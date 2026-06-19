@@ -106,6 +106,7 @@ void mapPoseToOriginal(PoseResult& pose, const PreprocessTransform& transform) {
     }
 }
 
+// 6.19加
 void mapCupToOriginal(CupResult& cup, const PreprocessTransform& transform) {
     if (!transform.valid || !cup.valid) {
         return;
@@ -117,6 +118,142 @@ void mapCupToOriginal(CupResult& cup, const PreprocessTransform& transform) {
     }
     cup.message += ",coords=original";
 }
+
+uint8_t clampToByte(int value) {
+    if (value < 0) {
+        return 0;
+    }
+    if (value > 255) {
+        return 255;
+    }
+    return static_cast<uint8_t>(value);
+}
+
+bool cropResizeNv12ToRgb888(
+    const Frame& source,
+    const CropRect& crop,
+    int output_width,
+    int output_height,
+    Frame& output) {
+    if (source.format != PixelFormat::NV12) {
+        return false;
+    }
+
+    if (source.width <= 0 || source.height <= 0 ||
+        output_width <= 0 || output_height <= 0) {
+        return false;
+    }
+
+    const std::size_t y_plane_size =
+        static_cast<std::size_t>(source.width) *
+        static_cast<std::size_t>(source.height);
+
+    const std::size_t required_size = y_plane_size + y_plane_size / 2U;
+    if (source.data.size() < required_size) {
+        std::cerr << "[ImageProcessor] NV12 data too small, data="
+                  << source.data.size()
+                  << ", required=" << required_size << "\n";
+        return false;
+    }
+
+    CropRect actual_crop = crop;
+    if (actual_crop.width <= 0 || actual_crop.height <= 0) {
+        actual_crop = CropRect{0, 0, source.width, source.height};
+    }
+
+    actual_crop.x = std::clamp(
+        actual_crop.x,
+        0,
+        std::max(0, source.width - 1));
+
+    actual_crop.y = std::clamp(
+        actual_crop.y,
+        0,
+        std::max(0, source.height - 1));
+
+    actual_crop.width = std::clamp(
+        actual_crop.width,
+        1,
+        source.width - actual_crop.x);
+
+    actual_crop.height = std::clamp(
+        actual_crop.height,
+        1,
+        source.height - actual_crop.y);
+
+    output.id = source.id;
+    output.width = output_width;
+    output.height = output_height;
+    output.channels = 3;
+    output.format = PixelFormat::RGB888;
+    output.timestamp_ms = source.timestamp_ms;
+
+    output.data.resize(
+        static_cast<std::size_t>(output_width) *
+        static_cast<std::size_t>(output_height) * 3U);
+
+    for (int dy = 0; dy < output_height; ++dy) {
+        const int sy = actual_crop.y +
+            static_cast<int>(
+                static_cast<int64_t>(dy) *
+                static_cast<int64_t>(actual_crop.height) /
+                static_cast<int64_t>(output_height));
+
+        const int clamped_sy = std::clamp(sy, 0, source.height - 1);
+
+        for (int dx = 0; dx < output_width; ++dx) {
+            const int sx = actual_crop.x +
+                static_cast<int>(
+                    static_cast<int64_t>(dx) *
+                    static_cast<int64_t>(actual_crop.width) /
+                    static_cast<int64_t>(output_width));
+
+            const int clamped_sx = std::clamp(sx, 0, source.width - 1);
+
+            const std::size_t y_index =
+                static_cast<std::size_t>(clamped_sy) *
+                static_cast<std::size_t>(source.width) +
+                static_cast<std::size_t>(clamped_sx);
+
+            const int uv_y = clamped_sy / 2;
+            const int uv_x = (clamped_sx / 2) * 2;
+
+            const std::size_t uv_index =
+                y_plane_size +
+                static_cast<std::size_t>(uv_y) *
+                static_cast<std::size_t>(source.width) +
+                static_cast<std::size_t>(uv_x);
+
+            if (uv_index + 1 >= source.data.size()) {
+                return false;
+            }
+
+            const int y = static_cast<int>(source.data[y_index]);
+            const int u = static_cast<int>(source.data[uv_index]) - 128;
+            const int v = static_cast<int>(source.data[uv_index + 1]) - 128;
+
+            // Full-range NV12 approximate conversion:
+            // R = Y + 1.402 V
+            // G = Y - 0.344 U - 0.714 V
+            // B = Y + 1.772 U
+            const int r = y + ((1436 * v) >> 10);
+            const int g = y - ((352 * u + 731 * v) >> 10);
+            const int b = y + ((1815 * u) >> 10);
+
+            const std::size_t out_index =
+                (static_cast<std::size_t>(dy) *
+                 static_cast<std::size_t>(output_width) +
+                 static_cast<std::size_t>(dx)) * 3U;
+
+            output.data[out_index + 0] = clampToByte(r);
+            output.data[out_index + 1] = clampToByte(g);
+            output.data[out_index + 2] = clampToByte(b);
+        }
+    }
+
+    return true;
+}
+// 6.19加
 
 }  // namespace
 
@@ -432,24 +569,47 @@ void VisionApp::aiLoop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.debug_ai_delay_ms));
         }
 
+        // 6.19加
         const CropRect full_frame_crop{0, 0, frame->width, frame->height};
         auto preprocessInput = [&](
-                                   const char* model_name,
-                                   int width,
-                                   int height,
-                                   Frame& output,
-                                   PreprocessTransform* transform = nullptr) {
-            if (!image_processor_.cropResize(*frame, full_frame_crop, width, height, output)) {
+                                const char* model_name,
+                                int width,
+                                int height,
+                                Frame& output,
+                                PreprocessTransform* transform = nullptr) {
+            bool preprocess_ok = false;
+
+            if (frame->format == PixelFormat::NV12) {
+                preprocess_ok = cropResizeNv12ToRgb888(
+                    *frame,
+                    full_frame_crop,
+                    width,
+                    height,
+                    output);
+            } else {
+                preprocess_ok = image_processor_.cropResize(
+                    *frame,
+                    full_frame_crop,
+                    width,
+                    height,
+                    output);
+            }
+
+            if (!preprocess_ok) {
                 std::cerr << "[AI] image preprocess failed, model=" << model_name
-                          << ", frame=" << frame->id
-                          << ", input=" << width << "x" << height << "\n";
+                        << ", frame=" << frame->id
+                        << ", source_format=" << static_cast<int>(frame->format)
+                        << ", input=" << width << "x" << height << "\n";
                 return false;
             }
+
             if (transform != nullptr) {
                 *transform = makeTransform(*frame, full_frame_crop, output);
             }
+
             return true;
         };
+        // 6.19加
 
         if (decision.run_gesture) {
             Frame gesture_input;
