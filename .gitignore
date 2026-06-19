@@ -1,0 +1,17 @@
+# 仅屏蔽编译文件夹
+rv1126b_vision_app/build-*/
+# CMake生成文件
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+*.o
+*.out
+# 压缩包
+*.tar.gz
+*.zip
+# 生成的可执行程序
+rv1126b_vision_app/rv1126b_vision_app
+# 日志临时文件
+*.log
+*.tmp
