@@ -6,6 +6,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+#include <cstring>
 
 #if defined(RV1126B_HAS_MPP)
 #include <mpp_buffer.h>
@@ -163,6 +164,43 @@ void prepareRgbDestination(const Frame& src, int dst_width, int dst_height, Fram
     dst.format = PixelFormat::RGB888;
     dst.timestamp_ms = src.timestamp_ms;
     dst.data.resize(static_cast<std::size_t>(dst_width) * static_cast<std::size_t>(dst_height) * 3U);
+}
+
+CropRect makeRgaSafeCrop(const Frame& src, const CropRect& crop) {
+    CropRect normalized = crop;
+
+    if (normalized.width <= 0 || normalized.height <= 0) {
+        normalized = CropRect{0, 0, src.width, src.height};
+    }
+
+    normalized.x = std::clamp(normalized.x, 0, std::max(0, src.width - 1));
+    normalized.y = std::clamp(normalized.y, 0, std::max(0, src.height - 1));
+    normalized.width = std::clamp(normalized.width, 1, src.width - normalized.x);
+    normalized.height = std::clamp(normalized.height, 1, src.height - normalized.y);
+
+    // NV12/YUV420 的 crop 坐标和宽高尽量保持偶数，避免 RGA/YUV 对齐问题。
+    if (src.format == PixelFormat::NV12) {
+        normalized.x &= ~1;
+        normalized.y &= ~1;
+        normalized.width &= ~1;
+        normalized.height &= ~1;
+
+        if (normalized.width <= 0) {
+            normalized.width = std::min(2, src.width - normalized.x);
+        }
+        if (normalized.height <= 0) {
+            normalized.height = std::min(2, src.height - normalized.y);
+        }
+
+        if (normalized.x + normalized.width > src.width) {
+            normalized.width = (src.width - normalized.x) & ~1;
+        }
+        if (normalized.y + normalized.height > src.height) {
+            normalized.height = (src.height - normalized.y) & ~1;
+        }
+    }
+
+    return normalized;
 }
 
 }  // namespace
@@ -471,13 +509,26 @@ void ImageProcessor::close() {
     rga_available_ = false;
 }
 
-bool ImageProcessor::cropResizeByRga(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst) {
+bool ImageProcessor::cropResizeByRga(
+    const Frame& src,
+    const CropRect& crop,
+    int dst_width,
+    int dst_height,
+    Frame& dst) {
 #if defined(RV1126B_HAS_RGA)
-    const CropRect normalized = normalizeCrop(src, crop);
-    const int src_format = toRgaFormat(src.format);
-    if (src_format < 0) {
+    if (src.data.empty() || src.width <= 0 || src.height <= 0 ||
+        dst_width <= 0 || dst_height <= 0) {
         return false;
     }
+
+    const int src_format = toRgaFormat(src.format);
+    if (src_format < 0) {
+        std::cerr << "[RGA] unsupported source pixel format="
+                  << static_cast<int>(src.format) << "\n";
+        return false;
+    }
+
+    const CropRect normalized = makeRgaSafeCrop(src, crop);
 
     prepareRgbDestination(src, dst_width, dst_height, dst);
 
@@ -485,12 +536,17 @@ bool ImageProcessor::cropResizeByRga(const Frame& src, const CropRect& crop, int
         const_cast<uint8_t*>(src.data.data()),
         src.width,
         src.height,
-        src_format);
+        src_format,
+        src.width,
+        src.height);
+
     rga_buffer_t dst_buffer = wrapbuffer_virtualaddr(
         dst.data.data(),
         dst.width,
         dst.height,
-        RK_FORMAT_RGB_888);
+        RK_FORMAT_RGB_888,
+        dst.width,
+        dst.height);
 
     im_rect src_rect{};
     src_rect.x = normalized.x;
@@ -504,19 +560,37 @@ bool ImageProcessor::cropResizeByRga(const Frame& src, const CropRect& crop, int
     dst_rect.width = dst.width;
     dst_rect.height = dst.height;
 
-    // RGA 实际执行裁剪 + 缩放 + 颜色转换。
-    // 当前使用 virtualaddr 方便接入；后续建议升级到 DMA-BUF fd，减少 Camera/RGA/RKNN/MPP 间 memcpy。
-    IM_STATUS check = imcheck(src_buffer, dst_buffer, src_rect, dst_rect);
+    IM_STATUS check = imcheck(src_buffer, dst_buffer, src_rect, dst_rect, IM_SYNC);
     if (check != IM_STATUS_NOERROR) {
-        std::cerr << "[RGA] imcheck failed: " << imStrError(check) << "\n";
+        std::cerr << "[RGA] imcheck failed: "
+                  << imStrError(check)
+                  << ", src=" << src.width << "x" << src.height
+                  << ", crop=(" << src_rect.x << "," << src_rect.y
+                  << "," << src_rect.width << "," << src_rect.height << ")"
+                  << ", dst=" << dst.width << "x" << dst.height
+                  << ", src_format=" << src_format
+                  << "\n";
         return false;
     }
 
-    IM_STATUS status = improcess(src_buffer, dst_buffer, {}, src_rect, dst_rect, {}, IM_SYNC);
+    IM_STATUS status = improcess(
+        src_buffer,
+        dst_buffer,
+        {},
+        src_rect,
+        dst_rect,
+        {},
+        IM_SYNC);
+
     if (status != IM_STATUS_NOERROR) {
-        std::cerr << "[RGA] improcess failed: " << imStrError(status) << "\n";
+        std::cerr << "[RGA] improcess failed: "
+                  << imStrError(status)
+                  << ", src=" << src.width << "x" << src.height
+                  << ", dst=" << dst.width << "x" << dst.height
+                  << "\n";
         return false;
     }
+
     return true;
 #else
     (void)src;
@@ -528,34 +602,95 @@ bool ImageProcessor::cropResizeByRga(const Frame& src, const CropRect& crop, int
 #endif
 }
 
-bool ImageProcessor::cropResizeByOpenCv(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst) {
+bool ImageProcessor::cropResizeByOpenCv(
+    const Frame& src,
+    const CropRect& crop,
+    int dst_width,
+    int dst_height,
+    Frame& dst) {
 #if defined(RV1126B_HAS_OPENCV)
-    const CropRect normalized = normalizeCrop(src, crop);
-
-    cv::Mat source;
-    if (src.format == PixelFormat::NV12) {
-        source = cv::Mat(src.height + src.height / 2, src.width, CV_8UC1, const_cast<uint8_t*>(src.data.data()));
-        cv::Mat rgb;
-        cv::cvtColor(source, rgb, cv::COLOR_YUV2RGB_NV12);
-        source = rgb;
-    } else if (src.format == PixelFormat::RGB888 || src.format == PixelFormat::BGR888) {
-        source = cv::Mat(src.height, src.width, toOpenCvType(src), const_cast<uint8_t*>(src.data.data()));
-        if (src.format == PixelFormat::BGR888) {
-            cv::Mat rgb;
-            cv::cvtColor(source, rgb, cv::COLOR_BGR2RGB);
-            source = rgb;
-        }
-    } else {
+    if (src.data.empty() || src.width <= 0 || src.height <= 0 ||
+        dst_width <= 0 || dst_height <= 0) {
         return false;
     }
 
-    cv::Rect roi(normalized.x, normalized.y, normalized.width, normalized.height);
-    cv::Mat resized;
-    cv::resize(source(roi), resized, cv::Size(dst_width, dst_height), 0, 0, cv::INTER_LINEAR);
+    const CropRect normalized = normalizeCrop(src, crop);
 
-    prepareRgbDestination(src, dst_width, dst_height, dst);
-    const std::size_t bytes = static_cast<std::size_t>(dst_width) * static_cast<std::size_t>(dst_height) * 3U;
-    std::memcpy(dst.data.data(), resized.data, bytes);
+    cv::Mat rgb_src;
+
+    if (src.format == PixelFormat::RGB888 || src.format == PixelFormat::BGR888) {
+        if (src.channels < 3) {
+            return false;
+        }
+
+        cv::Mat input(
+            src.height,
+            src.width,
+            CV_8UC3,
+            const_cast<uint8_t*>(src.data.data()));
+
+        if (src.format == PixelFormat::RGB888) {
+            rgb_src = input;
+        } else {
+            cv::cvtColor(input, rgb_src, cv::COLOR_BGR2RGB);
+        }
+    } else if (src.format == PixelFormat::NV12) {
+        const std::size_t required_size =
+            static_cast<std::size_t>(src.width) *
+            static_cast<std::size_t>(src.height) * 3U / 2U;
+
+        if (src.data.size() < required_size) {
+            std::cerr << "[OpenCV] NV12 data too small, data="
+                      << src.data.size()
+                      << ", required=" << required_size << "\n";
+            return false;
+        }
+
+        cv::Mat nv12(
+            src.height + src.height / 2,
+            src.width,
+            CV_8UC1,
+            const_cast<uint8_t*>(src.data.data()));
+
+        cv::cvtColor(nv12, rgb_src, cv::COLOR_YUV2RGB_NV12);
+    } else {
+        std::cerr << "[OpenCV] unsupported source format="
+                  << static_cast<int>(src.format) << "\n";
+        return false;
+    }
+
+    cv::Rect roi(
+        normalized.x,
+        normalized.y,
+        normalized.width,
+        normalized.height);
+
+    if (roi.x < 0 || roi.y < 0 ||
+        roi.x + roi.width > rgb_src.cols ||
+        roi.y + roi.height > rgb_src.rows) {
+        std::cerr << "[OpenCV] invalid crop roi\n";
+        return false;
+    }
+
+    cv::Mat cropped = rgb_src(roi);
+    cv::Mat resized;
+
+    cv::resize(cropped, resized, cv::Size(dst_width, dst_height), 0, 0, cv::INTER_LINEAR);
+
+    dst.id = src.id;
+    dst.width = dst_width;
+    dst.height = dst_height;
+    dst.channels = 3;
+    dst.format = PixelFormat::RGB888;
+    dst.timestamp_ms = src.timestamp_ms;
+
+    const std::size_t output_size =
+        static_cast<std::size_t>(dst_width) *
+        static_cast<std::size_t>(dst_height) * 3U;
+
+    dst.data.resize(output_size);
+    std::memcpy(dst.data.data(), resized.data, output_size);
+
     return true;
 #else
     (void)src;
@@ -567,34 +702,115 @@ bool ImageProcessor::cropResizeByOpenCv(const Frame& src, const CropRect& crop, 
 #endif
 }
 
-bool ImageProcessor::cropResizeBySoftware(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst) {
-    if (src.format != PixelFormat::RGB888 && src.format != PixelFormat::BGR888) {
-        std::cerr << "[ImageProcessor] software fallback only supports RGB888/BGR888\n";
+bool ImageProcessor::cropResizeBySoftware(
+    const Frame& src,
+    const CropRect& crop,
+    int dst_width,
+    int dst_height,
+    Frame& dst) {
+    if (src.data.empty() || src.width <= 0 || src.height <= 0 ||
+        dst_width <= 0 || dst_height <= 0) {
         return false;
     }
 
     const CropRect normalized = normalizeCrop(src, crop);
     prepareRgbDestination(src, dst_width, dst_height, dst);
 
-    // 软件兜底：最近邻裁剪缩放，性能最低，只用于没有 RGA/OpenCV 的开发环境自检。
-    for (int y = 0; y < dst_height; ++y) {
-        const int src_y = normalized.y + y * normalized.height / dst_height;
-        for (int x = 0; x < dst_width; ++x) {
-            const int src_x = normalized.x + x * normalized.width / dst_width;
-            const std::size_t src_index = static_cast<std::size_t>((src_y * src.width + src_x) * src.channels);
-            const std::size_t dst_index = static_cast<std::size_t>((y * dst_width + x) * 3);
-            if (src.format == PixelFormat::BGR888) {
-                dst.data[dst_index + 0] = src.data[src_index + 2];
-                dst.data[dst_index + 1] = src.data[src_index + 1];
-                dst.data[dst_index + 2] = src.data[src_index + 0];
-            } else {
-                dst.data[dst_index + 0] = src.data[src_index + 0];
-                dst.data[dst_index + 1] = src.data[src_index + 1];
-                dst.data[dst_index + 2] = src.data[src_index + 2];
+    if (src.format == PixelFormat::RGB888 || src.format == PixelFormat::BGR888) {
+        if (src.channels < 3) {
+            return false;
+        }
+
+        for (int y = 0; y < dst_height; ++y) {
+            const int src_y = normalized.y + y * normalized.height / dst_height;
+
+            for (int x = 0; x < dst_width; ++x) {
+                const int src_x = normalized.x + x * normalized.width / dst_width;
+
+                const std::size_t src_index =
+                    static_cast<std::size_t>((src_y * src.width + src_x) * src.channels);
+
+                const std::size_t dst_index =
+                    static_cast<std::size_t>((y * dst_width + x) * 3);
+
+                if (src.format == PixelFormat::BGR888) {
+                    dst.data[dst_index + 0] = src.data[src_index + 2];
+                    dst.data[dst_index + 1] = src.data[src_index + 1];
+                    dst.data[dst_index + 2] = src.data[src_index + 0];
+                } else {
+                    dst.data[dst_index + 0] = src.data[src_index + 0];
+                    dst.data[dst_index + 1] = src.data[src_index + 1];
+                    dst.data[dst_index + 2] = src.data[src_index + 2];
+                }
             }
         }
+
+        return true;
     }
-    return true;
+
+    if (src.format == PixelFormat::NV12) {
+        const std::size_t y_plane_size =
+            static_cast<std::size_t>(src.width) *
+            static_cast<std::size_t>(src.height);
+
+        const std::size_t required_size = y_plane_size + y_plane_size / 2U;
+
+        if (src.data.size() < required_size) {
+            std::cerr << "[ImageProcessor] NV12 data too small, data="
+                      << src.data.size()
+                      << ", required=" << required_size << "\n";
+            return false;
+        }
+
+        for (int y = 0; y < dst_height; ++y) {
+            const int src_y = normalized.y + y * normalized.height / dst_height;
+            const int clamped_src_y = std::clamp(src_y, 0, src.height - 1);
+
+            for (int x = 0; x < dst_width; ++x) {
+                const int src_x = normalized.x + x * normalized.width / dst_width;
+                const int clamped_src_x = std::clamp(src_x, 0, src.width - 1);
+
+                const std::size_t y_index =
+                    static_cast<std::size_t>(clamped_src_y) *
+                    static_cast<std::size_t>(src.width) +
+                    static_cast<std::size_t>(clamped_src_x);
+
+                const int uv_y = clamped_src_y / 2;
+                const int uv_x = (clamped_src_x / 2) * 2;
+
+                const std::size_t uv_index =
+                    y_plane_size +
+                    static_cast<std::size_t>(uv_y) *
+                    static_cast<std::size_t>(src.width) +
+                    static_cast<std::size_t>(uv_x);
+
+                if (uv_index + 1 >= src.data.size()) {
+                    return false;
+                }
+
+                const int yy = static_cast<int>(src.data[y_index]);
+                const int uu = static_cast<int>(src.data[uv_index]) - 128;
+                const int vv = static_cast<int>(src.data[uv_index + 1]) - 128;
+
+                const int rr = yy + ((1436 * vv) >> 10);
+                const int gg = yy - ((352 * uu + 731 * vv) >> 10);
+                const int bb = yy + ((1815 * uu) >> 10);
+
+                const std::size_t dst_index =
+                    static_cast<std::size_t>((y * dst_width + x) * 3);
+
+                dst.data[dst_index + 0] = clipByte(rr);
+                dst.data[dst_index + 1] = clipByte(gg);
+                dst.data[dst_index + 2] = clipByte(bb);
+            }
+        }
+
+        return true;
+    }
+
+    std::cerr << "[ImageProcessor] software fallback unsupported format="
+              << static_cast<int>(src.format) << "\n";
+    return false;
 }
 
 CropRect ImageProcessor::normalizeCrop(const Frame& src, const CropRect& crop) {

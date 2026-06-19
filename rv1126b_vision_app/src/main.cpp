@@ -1,6 +1,8 @@
 #include "App.hpp"
 
 #include <iostream>
+#include <cstdlib>
+#include <cstring>
 
 int main() {
     rv1126b::AppConfig config;
@@ -43,8 +45,21 @@ int main() {
     config.video_bitrate_kbps = 2048;
     config.video_gop = 25;
 
-    config.use_rga_preprocess = true;
-    config.fallback_to_opencv = true;
+    const char* preprocess_mode = std::getenv("RV_PREPROCESS_MODE");
+
+    if (preprocess_mode != nullptr && std::strcmp(preprocess_mode, "rga") == 0) {
+        config.use_rga_preprocess = true;
+        config.fallback_to_opencv = false;
+        std::cout << "[Config] preprocess_mode=rga\n";
+    } else if (preprocess_mode != nullptr && std::strcmp(preprocess_mode, "opencv") == 0) {
+        config.use_rga_preprocess = false;
+        config.fallback_to_opencv = true;
+        std::cout << "[Config] preprocess_mode=opencv\n";
+    } else {
+        config.use_rga_preprocess = false;
+        config.fallback_to_opencv = true;
+        std::cout << "[Config] preprocess_mode=opencv(default)\n";
+    }
 
     config.web_stream_protocol = rv1126b::WebStreamProtocol::WebRTC;
     config.device_ip = "192.168.1.50";
