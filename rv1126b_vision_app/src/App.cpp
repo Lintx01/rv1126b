@@ -706,13 +706,31 @@ void VisionApp::mqttLoop() {
     }
 }
 
+// 优化1(但是优化后cpu没有减少可恶)
 void VisionApp::displayLoop() {
+    bool has_last_face = false;
+    DisplayFace last_face = DisplayFace::NormalFace;
+
     while (!exit_requested_) {
         auto item = display_queue_.pop();
         if (!item.has_value()) {
             break;
         }
-        display_.showFace(*item);
+
+        const DisplayFace current_face = *item;
+
+        // 表情没有变化时，不重复刷新 ST7789
+        if (has_last_face && current_face == last_face) {
+            continue;
+        }
+
+        has_last_face = true;
+        last_face = current_face;
+
+        std::cout << "[Display] refresh face="
+                  << static_cast<int>(current_face) << "\n";
+
+        display_.showFace(current_face);
     }
 }
 
