@@ -5,7 +5,7 @@
 int main() {
     rv1126b::AppConfig config;
 
-    config.camera_device = "/dev/video0";
+    config.camera_device = "/dev/video23";
     config.frame_width = 640;
     config.frame_height = 480;
     config.frame_channels = 3;
@@ -16,7 +16,7 @@ int main() {
      * 普通 Linux/虚拟机无摄像头自测时可打开：
 
      */
-    config.enable_mock_camera = true;
+    config.enable_mock_camera = false;
     config.mock_camera_frame_count = 120; 
 
     config.ai_input_width = 320;
