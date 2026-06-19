@@ -80,6 +80,10 @@ bool writeTextFile(const std::string& path, const std::string& value) {
 }
 
 bool prepareGpio(int gpio) {
+    // 如果 gpio 是 -1，说明这个 GPIO 不需要软件控制。
+    if (gpio < 0) {
+        return true;
+    }
     const std::string gpio_path = "/sys/class/gpio/gpio" + std::to_string(gpio);
     if (!std::ifstream(gpio_path).good()) {
         (void)writeTextFile("/sys/class/gpio/export", std::to_string(gpio));
@@ -140,6 +144,7 @@ bool DisplayDevice::open(const AppConfig& config) {
         std::cout << "[Display] ST7789 open, spi=" << config.st7789_spi_device
                   << ", speed=" << config.st7789_spi_speed_hz
                   << ", size=" << config.st7789_width << "x" << config.st7789_height << "\n";
+        showHeartExpression();  //为了确认屏幕已经通，初始化加上显示逻辑
     }
     return opened_;
 }
@@ -340,6 +345,9 @@ bool DisplayDevice::writeData(const uint8_t* data, std::size_t length) {
 
 bool DisplayDevice::setGpio(int gpio, bool high) {
 #ifdef __linux__
+    if (gpio < 0) {
+        return true;
+    }
     const std::string value_path = "/sys/class/gpio/gpio" + std::to_string(gpio) + "/value";
     return writeTextFile(value_path, high ? "1" : "0");
 #else
