@@ -92,16 +92,16 @@ int main() {
      * P16 使用 SPI1 时，设备节点可能是 /dev/spidev1.0，需要在板子上用 /dev/spidev* 实测确认。
      * 第一次点屏建议先用 8MHz 或 16MHz；确认稳定后再提高速度，不建议直接 40MHz。
      */
-    config.enable_display = false;
-    config.st7789_spi_device = "/dev/spidev0.0";
+    config.enable_display = true;
+    config.st7789_spi_device = "/dev/spidev1.0";
     config.st7789_spi_speed_hz = 8000000;
     config.st7789_width = 240;
     config.st7789_height = 240;
     config.st7789_rotation = 0;
     config.st7789_invert_color = true;
-    config.st7789_gpio_dc = 24;
+    config.st7789_gpio_dc = 128;
     config.st7789_gpio_reset = 23;
-    config.st7789_gpio_backlight = 25;
+    config.st7789_gpio_backlight = -1;
 
     rv1126b::VisionApp app(config);
     const int rc = app.run();
