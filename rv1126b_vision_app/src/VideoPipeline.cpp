@@ -574,21 +574,31 @@ bool ImageProcessor::cropResizeByRga(
     }
 
     IM_STATUS status = improcess(
-        src_buffer,
-        dst_buffer,
-        {},
-        src_rect,
-        dst_rect,
-        {},
-        IM_SYNC);
+    src_buffer,
+    dst_buffer,
+    {},
+    src_rect,
+    dst_rect,
+    {},
+    IM_SYNC);
 
-    if (status != IM_STATUS_NOERROR) {
+    if (status != IM_STATUS_SUCCESS) {
         std::cerr << "[RGA] improcess failed: "
-                  << imStrError(status)
-                  << ", src=" << src.width << "x" << src.height
-                  << ", dst=" << dst.width << "x" << dst.height
-                  << "\n";
+                << imStrError(status)
+                << ", src=" << src.width << "x" << src.height
+                << ", dst=" << dst.width << "x" << dst.height
+                << "\n";
         return false;
+    }
+
+    static int rga_success_log_count = 0;
+    if (rga_success_log_count < 3) {
+        std::cout << "[RGA] preprocess ok, src="
+                << src.width << "x" << src.height
+                << ", dst=" << dst.width << "x" << dst.height
+                << ", src_format=" << static_cast<int>(src.format)
+                << "\n";
+        ++rga_success_log_count;
     }
 
     return true;
