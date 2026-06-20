@@ -382,6 +382,116 @@ bool decodeYoloDetectionRawOutputs(
     return decoded_any_head;
 }
 
+bool decodeYoloDetectionSplitOutputs(
+    const std::vector<std::vector<float>>& outputs,
+    const std::vector<RknnTensorInfo>& output_infos,
+    const Frame& frame,
+    float score_threshold,
+    std::vector<DetectionCandidate>& candidates) {
+    if (outputs.size() < 3 || output_infos.size() < 3) {
+        return false;
+    }
+
+    bool decoded_any_head = false;
+    std::vector<bool> used(outputs.size(), false);
+
+    for (std::size_t box_index = 0; box_index < outputs.size(); ++box_index) {
+        std::size_t box_channels = 0;
+        std::size_t grid_h = 0;
+        std::size_t grid_w = 0;
+        if (!tensorGridInfo(output_infos[box_index], outputs[box_index].size(), box_channels, grid_h, grid_w) ||
+            box_channels < kYoloPoseBoxChannels) {
+            continue;
+        }
+
+        std::size_t class_index = outputs.size();
+        std::size_t object_index = outputs.size();
+
+        for (std::size_t candidate_index = 0; candidate_index < outputs.size(); ++candidate_index) {
+            if (candidate_index == box_index) {
+                continue;
+            }
+
+            std::size_t channels = 0;
+            std::size_t candidate_grid_h = 0;
+            std::size_t candidate_grid_w = 0;
+            if (!tensorGridInfo(
+                    output_infos[candidate_index],
+                    outputs[candidate_index].size(),
+                    channels,
+                    candidate_grid_h,
+                    candidate_grid_w) ||
+                candidate_grid_h != grid_h ||
+                candidate_grid_w != grid_w) {
+                continue;
+            }
+
+            if (channels >= kYoloDetectClassCount && class_index == outputs.size()) {
+                class_index = candidate_index;
+            } else if (channels == 1 && object_index == outputs.size()) {
+                object_index = candidate_index;
+            }
+        }
+
+        if (class_index == outputs.size() || object_index == outputs.size() ||
+            used[box_index] || used[class_index] || used[object_index]) {
+            continue;
+        }
+
+        used[box_index] = true;
+        used[class_index] = true;
+        used[object_index] = true;
+        decoded_any_head = true;
+
+        const auto& box_values = outputs[box_index];
+        const auto& class_values = outputs[class_index];
+        const auto& object_values = outputs[object_index];
+        const std::size_t grid_size = grid_h * grid_w;
+        const float stride_x = static_cast<float>(std::max(1, frame.width)) / static_cast<float>(grid_w);
+        const float stride_y = static_cast<float>(std::max(1, frame.height)) / static_cast<float>(grid_h);
+
+        for (std::size_t y = 0; y < grid_h; ++y) {
+            for (std::size_t x = 0; x < grid_w; ++x) {
+                const std::size_t cell_index = y * grid_w + x;
+                const float class_score =
+                    normalizeYoloScore(class_values[kCupClassId * grid_size + cell_index]);
+                const float object_score = normalizeYoloScore(object_values[cell_index]);
+                const float cup_score = class_score * object_score;
+                if (cup_score < score_threshold) {
+                    continue;
+                }
+
+                std::array<float, kYoloPoseBoxChannels> distances{};
+                for (std::size_t channel = 0; channel < kYoloPoseBoxChannels; ++channel) {
+                    distances[channel] = box_values[channel * grid_size + cell_index];
+                }
+                for (std::size_t side = 0; side < 4; ++side) {
+                    softmaxInPlace(&distances[side * kYoloPoseBoxBins], kYoloPoseBoxBins);
+                }
+
+                std::array<float, 4> decoded{};
+                for (std::size_t side = 0; side < 4; ++side) {
+                    for (std::size_t bin = 0; bin < kYoloPoseBoxBins; ++bin) {
+                        decoded[side] += distances[side * kYoloPoseBoxBins + bin] * static_cast<float>(bin);
+                    }
+                }
+
+                const float x1 = (static_cast<float>(x) + 0.5F - decoded[0]) * stride_x;
+                const float y1 = (static_cast<float>(y) + 0.5F - decoded[1]) * stride_y;
+                const float x2 = (static_cast<float>(x) + 0.5F + decoded[2]) * stride_x;
+                const float y2 = (static_cast<float>(y) + 0.5F + decoded[3]) * stride_y;
+
+                appendCupDetection(
+                    makeBoxFromValues(x1, y1, x2, y2, frame.width, frame.height),
+                    cup_score,
+                    candidates);
+            }
+        }
+    }
+
+    return decoded_any_head;
+}
+
 bool decodeYoloDetectionDecodedOutput(
     const std::vector<std::vector<float>>& outputs,
     const std::vector<RknnTensorInfo>& output_infos,
@@ -877,14 +987,19 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
         parser_name = "cup_yolov8_raw_decoder";
     }
 
+    if (parser_name.empty() &&
+        decodeYoloDetectionSplitOutputs(outputs, model_.outputInfos(), frame, config_.cup_score_threshold, candidates)) {
+        parser_name = "cup_yolov8_split_decoder";
+    }
+
     // 兼容导出端已经把 DFL 解码成 [cx, cy, w, h, 80类分数] 的输出。
-    if (candidates.empty() &&
+    if (parser_name.empty() &&
         decodeYoloDetectionDecodedOutput(outputs, model_.outputInfos(), frame, config_.cup_score_threshold, candidates)) {
         parser_name = "cup_yolov8_decoded_tensor";
     }
 
     // 兼容模型侧或运行时已经后处理好的 [x,y,w/h,score,class] / [x,y,w/h,score] 输出。
-    if (candidates.empty() &&
+    if (parser_name.empty() &&
         decodePostprocessedCupOutput(outputs, frame, config_.cup_score_threshold, candidates)) {
         parser_name = "cup_postprocessed_boxes";
     }
