@@ -40,7 +40,7 @@ int main() {
      */
     config.enable_mpp_encoder = false;
     config.enable_mpp_decoder = false;
-    config.enable_web_stream = false;
+    config.enable_web_stream = true;
     config.input_stream_is_h264 = false;
     config.video_bitrate_kbps = 2048;
     config.video_gop = 25;
@@ -61,8 +61,8 @@ int main() {
         std::cout << "[Config] preprocess_mode=opencv(default)\n";
     }
 
-    config.web_stream_protocol = rv1126b::WebStreamProtocol::WebRTC;
-    config.device_ip = "192.168.1.50";
+    config.web_stream_protocol = rv1126b::WebStreamProtocol::Mjpeg;
+    config.device_ip = "192.168.137.2";
     config.web_server_ip = "192.168.1.10";
     config.web_server_port = 8080;
     config.webrtc_signaling_url = "ws://192.168.1.10:8080/webrtc/signaling";

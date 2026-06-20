@@ -63,7 +63,7 @@ if (RV1126B_ENABLE_RKNN)
 endif()
 
 if (RV1126B_ENABLE_OPENCV)
-    find_package(OpenCV QUIET COMPONENTS core imgproc)
+    find_package(OpenCV QUIET COMPONENTS core imgproc imgcodecs)
     if (OpenCV_FOUND)
         target_include_directories(rv1126b_vision_app PRIVATE ${OpenCV_INCLUDE_DIRS})
         target_link_libraries(rv1126b_vision_app PRIVATE ${OpenCV_LIBS})
