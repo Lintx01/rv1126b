@@ -298,22 +298,7 @@ bool MppEncoder::open(const AppConfig& config) {
         return false;
     }
 
-    MppPacket header_packet = nullptr;
-    ret = mpp_packet_init(&header_packet, nullptr, 0);
-    if (ret == MPP_OK && header_packet != nullptr) {
-        ret = impl_->mpi->control(impl_->ctx, MPP_ENC_GET_HDR_SYNC, header_packet);
-    }
-    if (ret == MPP_OK && header_packet != nullptr) {
-        const auto* ptr = static_cast<const uint8_t*>(mpp_packet_get_pos(header_packet));
-        const std::size_t len = static_cast<std::size_t>(mpp_packet_get_length(header_packet));
-        impl_->header.assign(ptr, ptr + len);
-        std::cout << "[MPP] encoder header size=" << impl_->header.size() << "\n";
-    } else {
-        std::cerr << "[MPP] MPP_ENC_GET_HDR_SYNC failed, ret=" << ret << "\n";
-    }
-    if (header_packet != nullptr) {
-        mpp_packet_deinit(&header_packet);
-    }
+    impl_->header.clear();
 
     impl_->real_mpp = true;
     std::cout << "[MPP] encoder open H264, bitrate=" << config.video_bitrate_kbps
