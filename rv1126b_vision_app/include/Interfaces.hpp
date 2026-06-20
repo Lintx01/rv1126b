@@ -119,6 +119,7 @@ public:
     bool open(const AppConfig& config);
     void showFace(DisplayFace face);
     void showHeartExpression();
+    void showSmileExpression();
     void close();
 
 private:

@@ -61,6 +61,8 @@ const char* displayFaceToLogString(DisplayFace face) {
             return "DrinkOkFace";
         case DisplayFace::GESTURE_OK_FACE:
             return "GestureOkFace";
+        case DisplayFace::SMILE_FACE:
+            return "SmileFace";
         case DisplayFace::SLEEP_FACE:
             return "SleepFace";
         case DisplayFace::ERROR_FACE:
@@ -151,20 +153,21 @@ bool DisplayDevice::open(const AppConfig& config) {
 
 void DisplayDevice::showFace(DisplayFace face) {
     if (!opened_) {
-        std::cout << "[DisplayMock] face=" << displayFaceToLogString(face) << "\n";
+        std::cout << "[DisplayMock] face=" << toString(face) << "\n";
         return;
     }
 
-    /*
-     * 第一版只打通业务状态到显示接口：
-     * GESTURE_OK_FACE 复用已有比心表情；其他表情先日志占位，后续再补真实图案。
-     */
     if (face == DisplayFace::GESTURE_OK_FACE) {
         showHeartExpression();
         return;
     }
 
-    std::cout << "[Display] " << displayFaceToLogString(face) << "\n";
+    if (face == DisplayFace::SMILE_FACE) {
+        showSmileExpression();
+        return;
+    }
+
+    std::cout << "[Display] " << toString(face) << "\n";
 }
 
 void DisplayDevice::showHeartExpression() {
@@ -176,24 +179,136 @@ void DisplayDevice::showHeartExpression() {
         return;
     }
 
-    /*
-     * 保留已有比心表情接口。
-     * 真实项目建议把 240x240 PNG 离线转换成 RGB565 数组，这里仍用 16x16 示例图案。
-     */
-    std::array<uint16_t, 16 * 16> pixels{};
-    pixels.fill(0x0000);
-    for (int y = 3; y < 13; ++y) {
-        for (int x = 3; x < 13; ++x) {
-            const int dx = x - 8;
-            const int dy = y - 8;
-            if ((dx * dx + dy * dy) < 35 || (y > 8 && x > 5 && x < 11)) {
-                pixels[static_cast<std::size_t>(y * 16 + x)] = 0xF81F;
+    const int width = config_.st7789_width;
+    const int height = config_.st7789_height;
+
+    std::vector<uint16_t> pixels(
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height),
+        0x0000);  // black
+
+    const auto setPixel = [&](int x, int y, uint16_t color) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return;
+        }
+        pixels[static_cast<std::size_t>(y * width + x)] = color;
+    };
+
+    const auto fillCircle = [&](int cx, int cy, int r, uint16_t color) {
+        for (int y = cy - r; y <= cy + r; ++y) {
+            for (int x = cx - r; x <= cx + r; ++x) {
+                const int dx = x - cx;
+                const int dy = y - cy;
+                if (dx * dx + dy * dy <= r * r) {
+                    setPixel(x, y, color);
+                }
+            }
+        }
+    };
+
+    const uint16_t pink = 0xF81F;
+    const uint16_t white = 0xFFFF;
+
+    const int cx = width / 2;
+    const int cy = height / 2 + 10;
+    const int r = std::min(width, height) / 7;
+
+    fillCircle(cx - r, cy - r, r, pink);
+    fillCircle(cx + r, cy - r, r, pink);
+
+    for (int y = cy - r; y <= cy + 3 * r; ++y) {
+        for (int x = cx - 3 * r; x <= cx + 3 * r; ++x) {
+            const int dx = std::abs(x - cx);
+            const int dy = y - cy;
+            if (dy >= -r && dx + dy < 3 * r) {
+                setPixel(x, y, pink);
             }
         }
     }
 
-    (void)drawRgb565Bitmap(pixels.data(), 16, 16);
+    // 简单白色边框
+    for (int i = 0; i < width; ++i) {
+        setPixel(i, 0, white);
+        setPixel(i, height - 1, white);
+    }
+    for (int i = 0; i < height; ++i) {
+        setPixel(0, i, white);
+        setPixel(width - 1, i, white);
+    }
+
+    (void)drawRgb565Bitmap(pixels.data(), width, height);
     std::cout << "[Display] show heart expression\n";
+}
+
+void DisplayDevice::showSmileExpression() {
+    if (!config_.enable_display) {
+        std::cout << "[Display] mock smile expression\n";
+        return;
+    }
+    if (!opened_) {
+        return;
+    }
+
+    const int width = config_.st7789_width;
+    const int height = config_.st7789_height;
+
+    std::vector<uint16_t> pixels(
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height),
+        0x0000);  // black
+
+    const auto setPixel = [&](int x, int y, uint16_t color) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+            return;
+        }
+        pixels[static_cast<std::size_t>(y * width + x)] = color;
+    };
+
+    const auto fillCircle = [&](int cx, int cy, int r, uint16_t color) {
+        for (int y = cy - r; y <= cy + r; ++y) {
+            for (int x = cx - r; x <= cx + r; ++x) {
+                const int dx = x - cx;
+                const int dy = y - cy;
+                if (dx * dx + dy * dy <= r * r) {
+                    setPixel(x, y, color);
+                }
+            }
+        }
+    };
+
+    const uint16_t yellow = 0xFFE0;
+    const uint16_t black = 0x0000;
+    const uint16_t white = 0xFFFF;
+
+    const int cx = width / 2;
+    const int cy = height / 2;
+    const int face_r = std::min(width, height) / 3;
+
+    // 脸
+    fillCircle(cx, cy, face_r, yellow);
+
+    // 眼睛
+    fillCircle(cx - face_r / 3, cy - face_r / 4, face_r / 10, black);
+    fillCircle(cx + face_r / 3, cy - face_r / 4, face_r / 10, black);
+
+    // 微笑，用简单抛物线画
+    for (int x = -face_r / 2; x <= face_r / 2; ++x) {
+        const int y = (x * x) / (face_r * 2);
+        for (int t = -2; t <= 2; ++t) {
+            setPixel(cx + x, cy + face_r / 5 + y + t, black);
+        }
+    }
+
+    // 白色边框
+    for (int i = 0; i < width; ++i) {
+        setPixel(i, 0, white);
+        setPixel(i, height - 1, white);
+    }
+    for (int i = 0; i < height; ++i) {
+        setPixel(0, i, white);
+        setPixel(width - 1, i, white);
+    }
+
+    (void)drawRgb565Bitmap(pixels.data(), width, height);
+    std::cout << "[Display] show smile expression\n";
 }
 
 void DisplayDevice::close() {

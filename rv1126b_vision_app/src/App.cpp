@@ -497,25 +497,56 @@ void VisionApp::aiLoop() {
                     std::cerr << "[AI] gesture infer unknown exception\n";
                 }
 
-                switch (gesture_result.type) {
+                                switch (gesture_result.type) {
                     case GestureType::Start:
                     {
                         requestStartByGesture();
-                        publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "start");
+
+                        // Start 只负责进入 Running，不显示爱心。
+                        // 顺手把屏幕恢复成普通表情，避免 ST7789 保持上一次爱心画面。
+                        display_queue_.push(DisplayFace::NormalFace);
+
+                        std::cout << "[AI] gesture start, class="
+                                  << gesture_result.gesture_name
+                                  << ", DisplayFace pushed=NormalFace\n";
                         break;
                     }
+
                     case GestureType::Stop:
                     {
                         requestStopByGesture();
-                        publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "stop");
+
+                        // Stop 只负责停止，可以显示 SleepFace。
+                        display_queue_.push(DisplayFace::SleepFace);
+
+                        std::cout << "[AI] gesture stop, class="
+                                  << gesture_result.gesture_name
+                                  << ", DisplayFace pushed=SleepFace\n";
                         break;
                     }
+
                     case GestureType::Heart:
                     {
-                        publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "heart");
+                        display_queue_.push(DisplayFace::GestureOkFace);
+
+                        std::cout << "[AI] gesture heart, class="
+                                  << gesture_result.gesture_name
+                                  << ", DisplayFace pushed=GestureOkFace\n";
                         break;
                     }
+
+                    case GestureType::Like:
+                    {
+                        display_queue_.push(DisplayFace::SmileFace);
+
+                        std::cout << "[AI] gesture like, class="
+                                  << gesture_result.gesture_name
+                                  << ", DisplayFace pushed=SmileFace\n";
+                        break;
+                    }
+
                     case GestureType::None:
+                    default:
                         break;
                 }
             }

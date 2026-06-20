@@ -15,7 +15,8 @@ enum class GestureType {
     None,
     Start,
     Stop,
-    Heart
+    Heart,
+    Like
 };
 
 enum class SystemState {
@@ -59,13 +60,16 @@ enum class DisplayFace {
     DrinkRemindFace,
     DrinkOkFace,
     GestureOkFace,
+    SmileFace,
     SleepFace,
     ErrorFace,
+
     NORMAL_FACE = NormalFace,
     BAD_POSTURE_FACE = BadPostureFace,
     DRINK_REMIND_FACE = DrinkRemindFace,
     DRINK_OK_FACE = DrinkOkFace,
     GESTURE_OK_FACE = GestureOkFace,
+    SMILE_FACE = SmileFace,
     SLEEP_FACE = SleepFace,
     ERROR_FACE = ErrorFace
 };
@@ -345,6 +349,10 @@ inline const char* toString(DisplayFace face) {
             return "sleep_face";
         case DisplayFace::ErrorFace:
             return "error_face";
+        case DisplayFace::SmileFace:
+            return "SmileFace";
+        default:
+            return "UnknownFace";
     }
     return "unknown_face";
 }
@@ -359,6 +367,10 @@ inline const char* toString(GestureType type) {
             return "stop";
         case GestureType::Heart:
             return "heart";
+        case GestureType::Like:
+            return "like";
+        default:
+            return "none";
     }
     return "unknown";
 }
