@@ -84,7 +84,8 @@ enum class PixelFormat {
 enum class WebStreamProtocol {
     WebRTC,
     WebSocket,
-    Mjpeg
+    Mjpeg,
+    HttpFlv
 };
 
 struct AppConfig {
@@ -183,7 +184,7 @@ struct EncodedPacket {
     uint64_t frame_id{0};
     PixelFormat codec{PixelFormat::H264};
     bool key_frame{false};
-    int64_t timestamp_ms{0};
+    uint64_t timestamp_ms{0};
     std::vector<uint8_t> data;
 };
 

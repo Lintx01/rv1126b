@@ -10,7 +10,7 @@ int main() {
     config.camera_device = "/dev/video23";
     config.frame_width = 640;
     config.frame_height = 480;
-    config.frame_channels = 3;
+    config.frame_channels = 1;
     config.target_fps = 25;
     // config.enable_mock_camera = false;      
     // config.mock_camera_frame_count = 0;     
@@ -38,12 +38,12 @@ int main() {
      * 开发阶段默认关闭外设和网络依赖，保证没有 ST7789、MQTT broker、MPP SDK、
      * Web 服务时，主程序仍可先启动，用于调摄像头采集和 AI 架构。
      */
-    config.enable_mpp_encoder = false;
+    config.enable_mpp_encoder = true;
     config.enable_mpp_decoder = false;
     config.enable_web_stream = true;
     config.input_stream_is_h264 = false;
     config.video_bitrate_kbps = 2048;
-    config.video_gop = 25;
+    config.video_gop = 30;
 
     const char* preprocess_mode = std::getenv("RV_PREPROCESS_MODE");
 
@@ -61,7 +61,7 @@ int main() {
         std::cout << "[Config] preprocess_mode=opencv(default)\n";
     }
 
-    config.web_stream_protocol = rv1126b::WebStreamProtocol::Mjpeg;
+    config.web_stream_protocol = rv1126b::WebStreamProtocol::HttpFlv;
     config.device_ip = "192.168.137.2";
     config.web_server_ip = "192.168.1.10";
     config.web_server_port = 8080;

@@ -25,6 +25,7 @@ add_executable(rv1126b_vision_app
     src/RknnModel.cpp
     src/MqttClient.cpp
     src/VideoPipeline.cpp
+    src/FlvMuxer.cpp
     src/WebRtcTransport.cpp
     src/WebStreamer.cpp
 )
@@ -96,7 +97,7 @@ if (RV1126B_ENABLE_MPP)
         target_compile_definitions(rv1126b_vision_app PRIVATE RV1126B_HAS_MPP=1)
         message(STATUS "Rockchip MPP enabled: ${MPP_LIBRARY}")
     else()
-        message(STATUS "Rockchip MPP not found, encoder fallback will be used")
+        message(STATUS "Rockchip MPP not found, H264 encoder will be disabled")
     endif()
 endif()
 

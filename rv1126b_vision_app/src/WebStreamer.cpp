@@ -1,4 +1,5 @@
 #include "Interfaces.hpp"
+#include "FlvMuxer.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -8,9 +9,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -61,6 +64,147 @@ bool sendAllString(int fd, const std::string& text) {
         fd,
         reinterpret_cast<const uint8_t*>(text.data()),
         text.size());
+}
+
+std::string readHttpRequestLine(int fd) {
+    std::string request;
+    request.reserve(512);
+
+    char ch = 0;
+    while (request.size() < 4096) {
+        const ssize_t n = ::recv(fd, &ch, 1, 0);
+        if (n <= 0) {
+            break;
+        }
+        request.push_back(ch);
+        if (request.size() >= 2 &&
+            request[request.size() - 2] == '\r' &&
+            request[request.size() - 1] == '\n') {
+            break;
+        }
+    }
+
+    return request;
+}
+
+std::string requestPathFromLine(const std::string& request_line) {
+    std::istringstream iss(request_line);
+    std::string method;
+    std::string path;
+    iss >> method >> path;
+    if (method != "GET" || path.empty()) {
+        return {};
+    }
+    return path;
+}
+
+std::string makeHttpHeader(const std::string& status, const std::string& content_type, std::size_t content_length) {
+    return "HTTP/1.1 " + status + "\r\n"
+           "Server: rv1126b_vision_app\r\n"
+           "Connection: close\r\n"
+           "Cache-Control: no-cache\r\n"
+           "Pragma: no-cache\r\n"
+           "Content-Type: " + content_type + "\r\n"
+           "Content-Length: " + std::to_string(content_length) + "\r\n"
+           "\r\n";
+}
+
+bool sendSimpleResponse(int fd, const std::string& status, const std::string& content_type, const std::string& body) {
+    return sendAllString(fd, makeHttpHeader(status, content_type, body.size())) &&
+           sendAllString(fd, body);
+}
+
+std::string makeIndexHtml(const AppConfig& config) {
+    const std::string url = "http://" + config.device_ip + ":" +
+                            std::to_string(config.web_server_port) + "/live.flv";
+    return R"(<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RV1126B HTTP-FLV</title>
+  <style>
+    body{margin:0;background:#111;color:#f5f5f5;font-family:Arial,Helvetica,sans-serif}
+    main{max-width:960px;margin:0 auto;padding:20px}
+    h1{font-size:28px;margin:0 0 16px}
+    video{width:100%;background:#000;aspect-ratio:4/3}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0}
+    button{font-size:16px;padding:8px 14px;cursor:pointer}
+    code,pre{background:#222;color:#d6f5d6;padding:8px;border-radius:4px}
+    pre{white-space:pre-wrap;overflow:auto}
+    a{color:#8fd3ff}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>RV1126B HTTP-FLV</h1>
+    <video id="video" controls autoplay muted playsinline></video>
+    <div class="row">
+      <button id="play">Play</button>
+      <span id="status">initializing</span>
+    </div>
+    <p>FLV stream: <a href="/live.flv">/live.flv</a></p>
+    <p>ffplay:</p>
+    <pre>ffplay -fflags nobuffer -flags low_delay )" + url + R"(</pre>
+    <p>state:</p>
+    <pre id="state">{}</pre>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+  <script>
+    const statusEl = document.getElementById('status');
+    const video = document.getElementById('video');
+    let player = null;
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function startPlayer() {
+      if (!window.flvjs || !flvjs.isSupported()) {
+        setStatus('flv.js is unavailable or this browser does not support MSE');
+        return;
+      }
+      if (player) {
+        player.destroy();
+        player = null;
+      }
+      player = flvjs.createPlayer({
+        type: 'flv',
+        isLive: true,
+        url: '/live.flv'
+      }, {
+        enableWorker: true,
+        enableStashBuffer: false,
+        stashInitialSize: 128
+      });
+      player.on(flvjs.Events.ERROR, function(type, detail) {
+        setStatus('player error: ' + type + ' / ' + detail);
+      });
+      player.attachMediaElement(video);
+      player.load();
+      video.play().then(function() {
+        setStatus('playing /live.flv');
+      }).catch(function(err) {
+        setStatus('click Play: ' + err.message);
+      });
+    }
+
+    document.getElementById('play').addEventListener('click', startPlayer);
+    window.addEventListener('load', startPlayer);
+
+    async function refreshState() {
+      try {
+        const res = await fetch('/state.json', {cache: 'no-store'});
+        document.getElementById('state').textContent = JSON.stringify(await res.json(), null, 2);
+      } catch (e) {
+        document.getElementById('state').textContent = e.message;
+      }
+    }
+    setInterval(refreshState, 1000);
+    refreshState();
+  </script>
+</body>
+</html>)";
 }
 
 #if defined(RV1126B_HAS_OPENCV)
@@ -295,6 +439,14 @@ struct WebStreamer::Impl {
     AppState latest_state;
     bool has_state{false};
 
+    FlvMuxer flv_muxer;
+    std::deque<std::vector<uint8_t>> flv_chunks;
+    uint64_t latest_flv_frame_id{0};
+    uint64_t flv_base_timestamp_ms{0};
+    bool flv_sequence_sent{false};
+    bool flv_waiting_for_key_frame{true};
+    bool flv_has_base_timestamp{false};
+
     std::atomic<bool> server_running{false};
     int server_fd{-1};
     int client_fd{-1};
@@ -309,19 +461,15 @@ WebStreamer::~WebStreamer() {
 bool WebStreamer::start(const AppConfig& config) {
     config_ = config;
 
-    if (config_.web_stream_protocol != WebStreamProtocol::Mjpeg) {
-        std::cerr << "[Web] only MJPEG is enabled in this debug version\n";
+    if (config_.web_stream_protocol != WebStreamProtocol::Mjpeg &&
+        config_.web_stream_protocol != WebStreamProtocol::HttpFlv) {
+        std::cerr << "[Web] unsupported web stream protocol\n";
         return false;
     }
 
-#if !defined(RV1126B_HAS_OPENCV)
-    std::cerr << "[Web][MJPEG] OpenCV is not enabled, cannot encode JPEG\n";
-    return false;
-#else
     impl_->server_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (impl_->server_fd < 0) {
-        std::cerr << "[Web][MJPEG] socket failed: "
-                  << std::strerror(errno) << "\n";
+        std::cerr << "[Web] socket failed: " << std::strerror(errno) << "\n";
         return false;
     }
 
@@ -342,7 +490,7 @@ bool WebStreamer::start(const AppConfig& config) {
             impl_->server_fd,
             reinterpret_cast<sockaddr*>(&addr),
             sizeof(addr)) < 0) {
-        std::cerr << "[Web][MJPEG] bind failed, port="
+        std::cerr << "[Web] bind failed, port="
                   << config_.web_server_port
                   << ", error=" << std::strerror(errno) << "\n";
         closeFd(impl_->server_fd);
@@ -350,7 +498,7 @@ bool WebStreamer::start(const AppConfig& config) {
     }
 
     if (::listen(impl_->server_fd, 2) < 0) {
-        std::cerr << "[Web][MJPEG] listen failed: "
+        std::cerr << "[Web] listen failed: "
                   << std::strerror(errno) << "\n";
         closeFd(impl_->server_fd);
         return false;
@@ -359,6 +507,148 @@ bool WebStreamer::start(const AppConfig& config) {
     impl_->server_running = true;
     running_ = true;
 
+    if (config_.web_stream_protocol == WebStreamProtocol::HttpFlv) {
+        std::cout << "[Web][HTTP-FLV] server listening on 0.0.0.0:"
+                  << config_.web_server_port
+                  << ", url=http://" << config_.device_ip
+                  << ":" << config_.web_server_port
+                  << "/live.flv\n";
+
+        impl_->server_thread = std::thread([this]() {
+            while (impl_->server_running) {
+                sockaddr_in client_addr{};
+                socklen_t client_len = sizeof(client_addr);
+
+                int client_fd = ::accept(
+                    impl_->server_fd,
+                    reinterpret_cast<sockaddr*>(&client_addr),
+                    &client_len);
+
+                if (client_fd < 0) {
+                    if (impl_->server_running) {
+                        std::cerr << "[Web][HTTP-FLV] accept failed: "
+                                  << std::strerror(errno) << "\n";
+                    }
+                    continue;
+                }
+
+                const std::string request_line = readHttpRequestLine(client_fd);
+                const std::string path = requestPathFromLine(request_line);
+
+                if (path == "/" || path == "/index.html") {
+                    sendSimpleResponse(client_fd, "200 OK", "text/html; charset=utf-8", makeIndexHtml(config_));
+                    closeFd(client_fd);
+                    continue;
+                }
+
+                if (path == "/state.json") {
+                    std::string body = "{}";
+                    {
+                        std::lock_guard<std::mutex> lock(impl_->mutex);
+                        if (impl_->has_state) {
+                            body = appStateToJson(impl_->latest_state);
+                        }
+                    }
+                    sendSimpleResponse(client_fd, "200 OK", "application/json", body);
+                    closeFd(client_fd);
+                    continue;
+                }
+
+                if (path != "/live.flv") {
+                    sendSimpleResponse(client_fd, "404 Not Found", "text/plain", "not found\n");
+                    closeFd(client_fd);
+                    continue;
+                }
+
+                std::cout << "[Web][HTTP-FLV] client connected\n";
+
+                const std::string header =
+                    "HTTP/1.1 200 OK\r\n"
+                    "Server: rv1126b_vision_app\r\n"
+                    "Connection: close\r\n"
+                    "Cache-Control: no-cache\r\n"
+                    "Pragma: no-cache\r\n"
+                    "Content-Type: video/x-flv\r\n"
+                    "\r\n";
+
+                const auto flv_header = impl_->flv_muxer.makeHeader();
+                if (!sendAllString(client_fd, header) ||
+                    !sendAll(client_fd, flv_header.data(), flv_header.size())) {
+                    closeFd(client_fd);
+                    std::cout << "[Web][HTTP-FLV] client disconnected\n";
+                    continue;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(impl_->mutex);
+                    closeFd(impl_->client_fd);
+                    impl_->client_fd = client_fd;
+                    impl_->flv_chunks.clear();
+                    impl_->flv_sequence_sent = false;
+                    impl_->flv_waiting_for_key_frame = true;
+                    impl_->flv_has_base_timestamp = false;
+                    impl_->flv_base_timestamp_ms = 0;
+                }
+
+                while (impl_->server_running) {
+                    std::vector<uint8_t> chunk;
+
+                    {
+                        std::unique_lock<std::mutex> lock(impl_->mutex);
+                        impl_->cv.wait_for(
+                            lock,
+                            std::chrono::milliseconds(1000),
+                            [&]() {
+                                return !impl_->server_running ||
+                                       impl_->client_fd != client_fd ||
+                                       !impl_->flv_chunks.empty();
+                            });
+
+                        if (!impl_->server_running || impl_->client_fd != client_fd) {
+                            break;
+                        }
+
+                        if (impl_->flv_chunks.empty()) {
+                            continue;
+                        }
+
+                        chunk = std::move(impl_->flv_chunks.front());
+                        impl_->flv_chunks.pop_front();
+                    }
+
+                    if (!sendAll(client_fd, chunk.data(), chunk.size())) {
+                        break;
+                    }
+                }
+
+                const int disconnected_fd = client_fd;
+                closeFd(client_fd);
+
+                {
+                    std::lock_guard<std::mutex> lock(impl_->mutex);
+                    if (impl_->client_fd == disconnected_fd) {
+                        impl_->client_fd = -1;
+                    }
+                    impl_->flv_chunks.clear();
+                    impl_->flv_sequence_sent = false;
+                    impl_->flv_waiting_for_key_frame = true;
+                    impl_->flv_has_base_timestamp = false;
+                }
+
+                std::cout << "[Web][HTTP-FLV] client disconnected\n";
+            }
+        });
+
+        return true;
+    }
+
+#if !defined(RV1126B_HAS_OPENCV)
+    std::cerr << "[Web][MJPEG] OpenCV is not enabled, cannot encode JPEG\n";
+    closeFd(impl_->server_fd);
+    impl_->server_running = false;
+    running_ = false;
+    return false;
+#else
     std::cout << "[Web][MJPEG] server listening on 0.0.0.0:"
               << config_.web_server_port
               << ", url=http://" << config_.device_ip
@@ -528,7 +818,77 @@ void WebStreamer::publishFrame(const FramePtr& frame) {
 }
 
 void WebStreamer::publishEncodedVideo(const EncodedPacket& packet) {
-    (void)packet;
+    if (!running_ || config_.web_stream_protocol != WebStreamProtocol::HttpFlv) {
+        return;
+    }
+
+    if (packet.codec != PixelFormat::H264 || packet.data.empty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (packet.key_frame) {
+        impl_->flv_muxer.updateSpsPpsFromAnnexB(packet.data.data(), packet.data.size());
+    }
+
+    if (impl_->client_fd < 0) {
+        return;
+    }
+
+    if (impl_->flv_waiting_for_key_frame && !packet.key_frame) {
+        return;
+    }
+
+    if (!impl_->flv_has_base_timestamp) {
+        impl_->flv_base_timestamp_ms = packet.timestamp_ms;
+        impl_->flv_has_base_timestamp = true;
+    }
+
+    const uint64_t rel_timestamp =
+        packet.timestamp_ms >= impl_->flv_base_timestamp_ms
+            ? packet.timestamp_ms - impl_->flv_base_timestamp_ms
+            : 0;
+    const uint32_t flv_timestamp = static_cast<uint32_t>(rel_timestamp);
+
+    if (!impl_->flv_sequence_sent && impl_->flv_muxer.hasSequenceHeader()) {
+        auto sequence = impl_->flv_muxer.makeSequenceHeaderTag(0);
+        if (!sequence.empty()) {
+            impl_->flv_chunks.push_back(std::move(sequence));
+            impl_->flv_sequence_sent = true;
+            impl_->flv_waiting_for_key_frame = false;
+            std::cout << "[Web][HTTP-FLV] send sequence header\n";
+        }
+    }
+
+    if (!impl_->flv_sequence_sent) {
+        return;
+    }
+
+    auto video_tag = impl_->flv_muxer.makeVideoTagFromAnnexB(
+        packet.data.data(),
+        packet.data.size(),
+        flv_timestamp,
+        packet.key_frame);
+
+    if (video_tag.empty()) {
+        return;
+    }
+
+    const std::size_t video_tag_size = video_tag.size();
+    impl_->flv_chunks.push_back(std::move(video_tag));
+    impl_->latest_flv_frame_id = packet.frame_id;
+
+    if (impl_->flv_chunks.size() > 120) {
+        impl_->flv_chunks.pop_front();
+    }
+
+    impl_->cv.notify_all();
+
+    if (packet.key_frame || (packet.frame_id % 30U) == 0U) {
+        std::cout << "[Web][HTTP-FLV] send video frame=" << packet.frame_id
+                  << ", key=" << (packet.key_frame ? "true" : "false")
+                  << ", size=" << video_tag_size << "\n";
+    }
 }
 
 void WebStreamer::publishResult(const VisionResult& result) {
@@ -542,7 +902,11 @@ void WebStreamer::publishResult(const VisionResult& result) {
         impl_->has_result = true;
     }
 
-    std::cout << "[Web][MJPEG] stored result frame=" << result.frame_id
+    const char* prefix = config_.web_stream_protocol == WebStreamProtocol::HttpFlv
+                             ? "[Web][HTTP-FLV]"
+                             : "[Web][MJPEG]";
+
+    std::cout << prefix << " stored result frame=" << result.frame_id
               << ", boxes=" << result.boxes.size()
               << ", bad_posture=" << (result.bad_posture ? "true" : "false")
               << ", drink_reminder=" << (result.drink_reminder ? "true" : "false")
@@ -560,7 +924,11 @@ void WebStreamer::publishAppState(const AppState& state) {
         impl_->has_state = true;
     }
 
-    std::cout << "[Web][MJPEG] stored app_state frame=" << state.frame_id
+    const char* prefix = config_.web_stream_protocol == WebStreamProtocol::HttpFlv
+                             ? "[Web][HTTP-FLV]"
+                             : "[Web][MJPEG]";
+
+    std::cout << prefix << " stored app_state frame=" << state.frame_id
               << ", posture_state=" << static_cast<int>(state.posture_state)
               << ", drink_state=" << static_cast<int>(state.drink_state)
               << ", face=" << static_cast<int>(state.display_face)

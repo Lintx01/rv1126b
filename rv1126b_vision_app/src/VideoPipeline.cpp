@@ -10,7 +10,6 @@
 
 #if defined(RV1126B_HAS_MPP)
 #include <mpp_buffer.h>
-#include <mpp_enc_cfg.h>
 #include <mpp_frame.h>
 #include <mpp_packet.h>
 #include <rk_mpi.h>
@@ -300,11 +299,19 @@ bool MppEncoder::open(const AppConfig& config) {
     }
 
     MppPacket header_packet = nullptr;
-    ret = impl_->mpi->control(impl_->ctx, MPP_ENC_GET_EXTRA_INFO, &header_packet);
+    ret = mpp_packet_init(&header_packet, nullptr, 0);
+    if (ret == MPP_OK && header_packet != nullptr) {
+        ret = impl_->mpi->control(impl_->ctx, MPP_ENC_GET_HDR_SYNC, header_packet);
+    }
     if (ret == MPP_OK && header_packet != nullptr) {
         const auto* ptr = static_cast<const uint8_t*>(mpp_packet_get_pos(header_packet));
         const std::size_t len = static_cast<std::size_t>(mpp_packet_get_length(header_packet));
         impl_->header.assign(ptr, ptr + len);
+        std::cout << "[MPP] encoder header size=" << impl_->header.size() << "\n";
+    } else {
+        std::cerr << "[MPP] MPP_ENC_GET_HDR_SYNC failed, ret=" << ret << "\n";
+    }
+    if (header_packet != nullptr) {
         mpp_packet_deinit(&header_packet);
     }
 
@@ -314,8 +321,9 @@ bool MppEncoder::open(const AppConfig& config) {
               << ", stride=" << impl_->hor_stride << "x" << impl_->ver_stride << "\n";
     return true;
 #else
-    std::cout << "[MPP] SDK not available, encoder fallback enabled\n";
-    return true;
+    std::cerr << "[MPP] encoder disabled: built without Rockchip MPP SDK\n";
+    opened_ = false;
+    return false;
 #endif
 }
 
@@ -396,11 +404,14 @@ bool MppEncoder::encode(const Frame& frame, EncodedPacket& packet) {
     }
 #endif
 
+    /*
     packet.key_frame = (encoded_count_ == 1) || (config_.video_gop > 0 && encoded_count_ % config_.video_gop == 0);
     // fallback Annex-B 伪码流：用于无 MPP SDK 的普通环境自检，不代表真实编码质量。
     packet.data = {0x00, 0x00, 0x00, 0x01, static_cast<uint8_t>(packet.key_frame ? 0x65 : 0x41),
                    static_cast<uint8_t>(frame.id & 0xFFU)};
-    return true;
+    */
+    std::cerr << "[MPP] encode unavailable: real MPP encoder is not open\n";
+    return false;
 }
 
 void MppEncoder::close() {
@@ -844,6 +855,8 @@ std::string toString(WebStreamProtocol protocol) {
             return "WebSocket";
         case WebStreamProtocol::Mjpeg:
             return "MJPEG";
+        case WebStreamProtocol::HttpFlv:
+            return "HTTP-FLV";
     }
     throw std::runtime_error("unknown web stream protocol");
 }

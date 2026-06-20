@@ -222,7 +222,12 @@ bool VisionApp::start() {
 
         if (config_.enable_mpp_encoder) {
             if (!mpp_encoder_.open(config_)) {
-                std::cerr << "[App] warning: mpp encoder open failed, encoderLoop will use raw-frame fallback\n";
+                std::cerr << "[App] warning: mpp encoder open failed";
+                if (config_.web_stream_protocol == WebStreamProtocol::HttpFlv) {
+                    std::cerr << ", HTTP-FLV requires real H264 encoder\n";
+                } else {
+                    std::cerr << ", encoderLoop will use raw-frame fallback\n";
+                }
             }
         } else {
             std::cout << "[App] MPP encoder disabled by config\n";
@@ -400,6 +405,11 @@ void VisionApp::encoderLoop() {
         EncodedPacket packet;
         if (mpp_encoder_.encode(**item, packet)) {
             web_.publishEncodedVideo(packet);
+        } else if (config_.web_stream_protocol == WebStreamProtocol::HttpFlv) {
+            if ((frame_id % 30U) == 0U) {
+                std::cerr << "[Encoder] H264 encode failed, HTTP-FLV frame dropped, frame_id="
+                          << frame_id << "\n";
+            }
         } else {
             web_.publishFrame(*item);
         }
