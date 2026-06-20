@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <cstring>
 
 namespace rv1126b {
 
@@ -413,6 +414,17 @@ void VisionApp::aiLoop() {
     uint64_t last_ai_buffer_version = 0;
     uint64_t last_ai_frame_id = 0;
 
+    const char* force_ai_env = std::getenv("RV_FORCE_AI_RUNNING");
+    const bool force_ai_running =
+        force_ai_env != nullptr &&
+        (std::strcmp(force_ai_env, "1") == 0 ||
+         std::strcmp(force_ai_env, "true") == 0 ||
+         std::strcmp(force_ai_env, "on") == 0);
+
+    if (force_ai_running) {
+        std::cout << "[AI] force running enabled, gesture start gate bypassed\n";
+    }
+
     while (!exit_requested_) {
         FramePtr frame;
         uint64_t new_ai_buffer_version = 0;
@@ -434,7 +446,7 @@ void VisionApp::aiLoop() {
         }
         last_ai_frame_id = frame->id;
 
-        const bool running_mode = (state_.load() == SystemState::Running);
+        const bool running_mode = force_ai_running || state_.load() == SystemState::Running;
         const AiScheduleDecision decision = ai_scheduler_.next(frame->timestamp_ms, running_mode);
         if (!decision.run_gesture && !decision.run_pose && !decision.run_cup) {
             continue;

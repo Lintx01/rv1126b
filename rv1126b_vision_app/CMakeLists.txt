@@ -106,3 +106,38 @@ else()
     target_compile_options(rv1126b_vision_app PRIVATE -Wall -Wextra -Wpedantic)
     target_link_libraries(rv1126b_vision_app PRIVATE pthread)
 endif()
+
+
+
+
+# Single image gesture model test tool.
+# Usage:
+#   ./build-rknn/gesture_image_test /path/to/image.jpg
+add_executable(gesture_image_test
+    tools/gesture_image_test.cpp
+    src/GestureModel.cpp
+    src/RknnModel.cpp
+)
+
+target_include_directories(gesture_image_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rknn/include
+)
+
+target_compile_features(gesture_image_test PRIVATE cxx_std_17)
+
+if(RV1126B_ENABLE_RKNN)
+    target_compile_definitions(gesture_image_test PRIVATE RV1126B_HAS_RKNN)
+    target_link_libraries(gesture_image_test PRIVATE /usr/lib/librknnrt.so)
+endif()
+
+if(RV1126B_ENABLE_OPENCV)
+    target_compile_definitions(gesture_image_test PRIVATE RV1126B_HAS_OPENCV)
+
+    target_link_libraries(gesture_image_test PRIVATE
+        ${OpenCV_LIBRARIES}
+        opencv_core
+        opencv_imgproc
+        opencv_imgcodecs
+    )
+endif()
