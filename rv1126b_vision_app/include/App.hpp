@@ -49,6 +49,12 @@ private:
         PostureState posture_state,
         DrinkState drink_state,
         const std::string& gesture_name);
+    void updateOverlayGesture(const GestureResult& gesture);
+    void updateOverlayPerception(
+        const PoseResult& pose,
+        const CupResult& cup,
+        const AppState& state);
+    bool applyVideoOverlay(const Frame& src, Frame& dst);
     DisplayFace selectDisplayFace(const AppState& state) const;
     bool shouldRunEncoderPipeline() const;
     static int64_t nowMs();
@@ -84,6 +90,10 @@ private:
     std::atomic<bool> thread_error_{false};
     std::atomic<SystemState> state_{SystemState::Idle};
     std::mutex state_mutex_;
+    std::mutex overlay_mutex_;
+    AiResultBundle latest_overlay_ai_;
+    AppState latest_overlay_state_;
+    bool overlay_runtime_enabled_{false};
 };
 
 }  // namespace rv1126b

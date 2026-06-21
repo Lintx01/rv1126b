@@ -10,6 +10,7 @@ option(RV1126B_ENABLE_OPENCV "Enable OpenCV image preprocess fallback when OpenC
 option(RV1126B_ENABLE_RKNN "Enable RKNN model inference when headers and library are available" ON)
 option(RV1126B_ENABLE_MQTT "Enable libmosquitto MQTT client when headers and library are available" ON)
 option(RV1126B_ENABLE_MPP "Enable Rockchip MPP H264 encoder when headers and library are available" ON)
+option(RV1126B_ENABLE_GSTREAMER_RTSP "Build GStreamer RTSP relay tool" OFF)
 
 set(RV1126B_LOCAL_RKNN_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rknn/include")
 set(RV1126B_LOCAL_RKNN_LIBRARY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rknn/lib")
@@ -111,6 +112,43 @@ endif()
 
 
 
+if (RV1126B_ENABLE_GSTREAMER_RTSP)
+    find_package(PkgConfig QUIET)
+    if (NOT PKG_CONFIG_FOUND)
+        message(FATAL_ERROR "GStreamer RTSP requested but dependencies not found.")
+    endif()
+
+    pkg_check_modules(GSTREAMER_RTSP QUIET
+        gstreamer-1.0
+        gstreamer-rtsp-server-1.0)
+
+    if (NOT GSTREAMER_RTSP_FOUND)
+        message(FATAL_ERROR "GStreamer RTSP requested but dependencies not found.")
+    endif()
+
+    add_executable(rv1126b_rtsp_relay
+        tools/rtsp_relay.cpp
+    )
+
+    target_compile_features(rv1126b_rtsp_relay PRIVATE cxx_std_17)
+    target_include_directories(rv1126b_rtsp_relay PRIVATE
+        ${GSTREAMER_RTSP_INCLUDE_DIRS}
+    )
+    target_compile_options(rv1126b_rtsp_relay PRIVATE
+        ${GSTREAMER_RTSP_CFLAGS_OTHER}
+    )
+    target_link_directories(rv1126b_rtsp_relay PRIVATE
+        ${GSTREAMER_RTSP_LIBRARY_DIRS}
+    )
+    target_link_libraries(rv1126b_rtsp_relay PRIVATE
+        ${GSTREAMER_RTSP_LIBRARIES}
+    )
+
+    if (NOT MSVC)
+        target_compile_options(rv1126b_rtsp_relay PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
 # Single image gesture model test tool.
 # Usage:
 #   ./build-rknn/gesture_image_test /path/to/image.jpg
@@ -136,6 +174,36 @@ if(RV1126B_ENABLE_OPENCV)
     target_compile_definitions(gesture_image_test PRIVATE RV1126B_HAS_OPENCV)
 
     target_link_libraries(gesture_image_test PRIVATE
+        ${OpenCV_LIBRARIES}
+        opencv_core
+        opencv_imgproc
+        opencv_imgcodecs
+    )
+endif()
+
+add_executable(single_image_ai_debug
+    tools/single_image_ai_debug.cpp
+    src/GestureModel.cpp
+    src/PerceptionModules.cpp
+    src/RknnModel.cpp
+)
+
+target_include_directories(single_image_ai_debug PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rknn/include
+)
+
+target_compile_features(single_image_ai_debug PRIVATE cxx_std_17)
+
+if(RV1126B_ENABLE_RKNN)
+    target_compile_definitions(single_image_ai_debug PRIVATE RV1126B_HAS_RKNN)
+    target_link_libraries(single_image_ai_debug PRIVATE /usr/lib/librknnrt.so)
+endif()
+
+if(RV1126B_ENABLE_OPENCV)
+    target_compile_definitions(single_image_ai_debug PRIVATE RV1126B_HAS_OPENCV)
+
+    target_link_libraries(single_image_ai_debug PRIVATE
         ${OpenCV_LIBRARIES}
         opencv_core
         opencv_imgproc

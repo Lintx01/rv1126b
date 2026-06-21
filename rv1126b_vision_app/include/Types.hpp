@@ -111,6 +111,7 @@ struct AppConfig {
     bool enable_mpp_encoder{true};
     bool enable_mpp_decoder{false};
     bool enable_web_stream{false};
+    bool enable_video_overlay{true};
     bool input_stream_is_h264{false};
     int video_bitrate_kbps{2048};
     int video_gop{25};

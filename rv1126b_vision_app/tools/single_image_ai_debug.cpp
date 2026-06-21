@@ -1,0 +1,447 @@
+#include "Interfaces.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#if defined(RV1126B_HAS_OPENCV)
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#endif
+
+namespace {
+
+constexpr const char* kKeypointNames[17] = {
+    "nose",
+    "left_eye",
+    "right_eye",
+    "left_ear",
+    "right_ear",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+    "left_hip",
+    "right_hip",
+    "left_knee",
+    "right_knee",
+    "left_ankle",
+    "right_ankle",
+};
+
+rv1126b::AppConfig makeDebugConfig() {
+    rv1126b::AppConfig config;
+    config.enable_mock_camera = false;
+    config.enable_display = false;
+    config.enable_mqtt = false;
+    config.enable_web_stream = false;
+    config.enable_mpp_decoder = false;
+    config.enable_mpp_encoder = false;
+    config.use_rga_preprocess = false;
+    config.fallback_to_opencv = true;
+
+    config.gesture_model_path = "model/yolov5_gesture_rv1126b.rknn";
+    config.pose_model_path = "model/yolov8n-pose-rv1126b-i8.rknn";
+    config.cup_model_path = "model/yolov8n_rv1126b_i8.rknn";
+
+    config.gesture_input_width = 224;
+    config.gesture_input_height = 224;
+    config.pose_input_width = 640;
+    config.pose_input_height = 640;
+    config.cup_input_width = 640;
+    config.cup_input_height = 640;
+
+    config.gesture_score_threshold = 0.60F;
+    config.pose_keypoint_score_threshold = 0.35F;
+    config.cup_score_threshold = 0.50F;
+    config.drink_distance_norm_threshold = 0.40F;
+    config.drink_consecutive_hits = 3;
+    return config;
+}
+
+const char* postureText(rv1126b::PostureState state) {
+    switch (state) {
+        case rv1126b::PostureState::Good:
+            return "NORMAL";
+        case rv1126b::PostureState::BadPending:
+        case rv1126b::PostureState::BadAlert:
+            return "HUNCHBACK";
+        case rv1126b::PostureState::Unknown:
+            return "UNKNOWN";
+    }
+    return "UNKNOWN";
+}
+
+const char* drinkText(rv1126b::DrinkState state) {
+    switch (state) {
+        case rv1126b::DrinkState::DrinkDetected:
+            return "DRINKING";
+        case rv1126b::DrinkState::NeedRemind:
+            return "NEED_DRINK";
+        case rv1126b::DrinkState::Normal:
+            return "NO_DRINK";
+    }
+    return "UNKNOWN";
+}
+
+std::string boxText(const rv1126b::Box& box) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1)
+        << box.x << "," << box.y << "," << box.w << "," << box.h
+        << "," << std::setprecision(3) << box.score;
+    return oss.str();
+}
+
+rv1126b::Box mapBoxToOriginal(
+    const rv1126b::Box& box,
+    int model_width,
+    int model_height,
+    int original_width,
+    int original_height) {
+    rv1126b::Box mapped = box;
+    const float sx = static_cast<float>(original_width) / static_cast<float>(std::max(1, model_width));
+    const float sy = static_cast<float>(original_height) / static_cast<float>(std::max(1, model_height));
+    mapped.x = box.x * sx;
+    mapped.y = box.y * sy;
+    mapped.w = box.w * sx;
+    mapped.h = box.h * sy;
+    return mapped;
+}
+
+rv1126b::PoseKeypoint mapKeypointToOriginal(
+    const rv1126b::PoseKeypoint& keypoint,
+    int model_width,
+    int model_height,
+    int original_width,
+    int original_height) {
+    rv1126b::PoseKeypoint mapped = keypoint;
+    mapped.x = keypoint.x * static_cast<float>(original_width) / static_cast<float>(std::max(1, model_width));
+    mapped.y = keypoint.y * static_cast<float>(original_height) / static_cast<float>(std::max(1, model_height));
+    return mapped;
+}
+
+void mapPoseToOriginal(
+    rv1126b::PoseResult& pose,
+    int model_width,
+    int model_height,
+    int original_width,
+    int original_height) {
+    if (pose.has_person) {
+        pose.person_box = mapBoxToOriginal(pose.person_box, model_width, model_height, original_width, original_height);
+    }
+    for (auto& keypoint : pose.keypoints) {
+        keypoint = mapKeypointToOriginal(keypoint, model_width, model_height, original_width, original_height);
+    }
+}
+
+void mapCupToOriginal(
+    rv1126b::CupResult& cup,
+    int model_width,
+    int model_height,
+    int original_width,
+    int original_height) {
+    cup.cup_box = mapBoxToOriginal(cup.cup_box, model_width, model_height, original_width, original_height);
+    for (auto& box : cup.cups) {
+        box = mapBoxToOriginal(box, model_width, model_height, original_width, original_height);
+    }
+}
+
+float estimateDrinkDistanceNorm(const rv1126b::PoseResult& pose, const rv1126b::CupResult& cup, float threshold) {
+    if (!pose.valid || !pose.has_person || !cup.valid || cup.cups.empty()) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+
+    const std::array<int, 3> head_indices{0, 3, 4};
+    float x_sum = 0.0F;
+    float y_sum = 0.0F;
+    int count = 0;
+    for (const int index : head_indices) {
+        const auto& point = pose.keypoints[static_cast<std::size_t>(index)];
+        if (point.score >= threshold) {
+            x_sum += point.x;
+            y_sum += point.y;
+            ++count;
+        }
+    }
+    if (count == 0) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+
+    const float head_x = x_sum / static_cast<float>(count);
+    const float head_y = y_sum / static_cast<float>(count);
+    const float diag = std::max(
+        1.0F,
+        std::sqrt(pose.person_box.w * pose.person_box.w + pose.person_box.h * pose.person_box.h));
+
+    float best = std::numeric_limits<float>::max();
+    for (const auto& box : cup.cups) {
+        const float cx = box.x + box.w * 0.5F;
+        const float cy = box.y + box.h * 0.5F;
+        const float dx = cx - head_x;
+        const float dy = cy - head_y;
+        best = std::min(best, std::sqrt(dx * dx + dy * dy) / diag);
+    }
+    return best;
+}
+
+#if defined(RV1126B_HAS_OPENCV)
+bool makeRgbFrameFromImage(
+    const cv::Mat& original_bgr,
+    int width,
+    int height,
+    const std::string& debug_path,
+    uint64_t frame_id,
+    rv1126b::Frame& frame) {
+    cv::Mat resized_bgr;
+    cv::resize(original_bgr, resized_bgr, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
+    cv::imwrite(debug_path, resized_bgr);
+
+    cv::Mat rgb;
+    cv::cvtColor(resized_bgr, rgb, cv::COLOR_BGR2RGB);
+
+    frame.id = frame_id;
+    frame.width = width;
+    frame.height = height;
+    frame.channels = 3;
+    frame.format = rv1126b::PixelFormat::RGB888;
+    frame.timestamp_ms = 0;
+    frame.data.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3U);
+    std::memcpy(frame.data.data(), rgb.data, frame.data.size());
+    return true;
+}
+
+cv::Rect toRect(const rv1126b::Box& box, int width, int height) {
+    const int x0 = std::clamp(static_cast<int>(std::round(box.x)), 0, std::max(0, width - 1));
+    const int y0 = std::clamp(static_cast<int>(std::round(box.y)), 0, std::max(0, height - 1));
+    const int x1 = std::clamp(static_cast<int>(std::round(box.x + box.w)), 0, std::max(0, width - 1));
+    const int y1 = std::clamp(static_cast<int>(std::round(box.y + box.h)), 0, std::max(0, height - 1));
+    return cv::Rect(cv::Point(std::min(x0, x1), std::min(y0, y1)),
+                    cv::Point(std::max(x0 + 1, x1), std::max(y0 + 1, y1)));
+}
+
+void putLabel(cv::Mat& image, const std::string& text, int x, int y, const cv::Scalar& color) {
+    const cv::Point origin(std::clamp(x, 0, std::max(0, image.cols - 1)),
+                           std::clamp(y, 12, std::max(12, image.rows - 1)));
+    cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+    cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv::LINE_AA);
+}
+
+void drawOverlay(
+    const cv::Mat& original_bgr,
+    const rv1126b::GestureResult& gesture,
+    const rv1126b::PoseResult& pose,
+    const rv1126b::CupResult& cup,
+    rv1126b::PostureState posture,
+    rv1126b::DrinkState drink) {
+    cv::Mat overlay = original_bgr.clone();
+    const cv::Scalar person_color(0, 255, 0);
+    const cv::Scalar keypoint_color(0, 255, 255);
+    const cv::Scalar skeleton_color(255, 255, 0);
+    const cv::Scalar cup_color(255, 160, 0);
+    const cv::Scalar text_color(255, 255, 255);
+
+    if (pose.valid && pose.has_person) {
+        const cv::Rect rect = toRect(pose.person_box, overlay.cols, overlay.rows);
+        cv::rectangle(overlay, rect, person_color, 2);
+        putLabel(overlay, "person", rect.x, std::max(14, rect.y - 4), person_color);
+
+        static const std::array<std::pair<int, int>, 16> skeleton{{
+            {0, 1}, {0, 2}, {1, 3}, {2, 4},
+            {5, 6}, {5, 7}, {7, 9}, {6, 8},
+            {8, 10}, {5, 11}, {6, 12}, {11, 12},
+            {11, 13}, {13, 15}, {12, 14}, {14, 16}
+        }};
+
+        auto visible = [&](int index) {
+            return pose.keypoints[static_cast<std::size_t>(index)].score >= 0.35F;
+        };
+
+        for (const auto& link : skeleton) {
+            if (!visible(link.first) || !visible(link.second)) {
+                continue;
+            }
+            const auto& a = pose.keypoints[static_cast<std::size_t>(link.first)];
+            const auto& b = pose.keypoints[static_cast<std::size_t>(link.second)];
+            cv::line(overlay,
+                     cv::Point(static_cast<int>(std::round(a.x)), static_cast<int>(std::round(a.y))),
+                     cv::Point(static_cast<int>(std::round(b.x)), static_cast<int>(std::round(b.y))),
+                     skeleton_color,
+                     2,
+                     cv::LINE_AA);
+        }
+
+        for (const auto& point : pose.keypoints) {
+            if (point.score < 0.35F) {
+                continue;
+            }
+            cv::circle(overlay,
+                       cv::Point(static_cast<int>(std::round(point.x)), static_cast<int>(std::round(point.y))),
+                       3,
+                       keypoint_color,
+                       -1,
+                       cv::LINE_AA);
+        }
+    }
+
+    for (const auto& box : cup.cups) {
+        const cv::Rect rect = toRect(box, overlay.cols, overlay.rows);
+        cv::rectangle(overlay, rect, cup_color, 2);
+        putLabel(overlay, box.label.empty() ? "cup" : box.label, rect.x, std::max(14, rect.y - 4), cup_color);
+    }
+
+    const std::string gesture_name = gesture.gesture_name.empty() ? rv1126b::toString(gesture.type) : gesture.gesture_name;
+    int y = 24;
+    putLabel(overlay, "gesture: " + gesture_name, 10, y, text_color);
+    y += 22;
+    putLabel(overlay, "posture: " + std::string(postureText(posture)), 10, y, text_color);
+    y += 22;
+    putLabel(overlay, "cup_count: " + std::to_string(cup.cups.size()), 10, y, text_color);
+    y += 22;
+    putLabel(overlay, "drink_state: " + std::string(drinkText(drink)), 10, y, text_color);
+
+    cv::imwrite("/tmp/single_image_ai_debug_overlay.jpg", overlay);
+}
+#endif
+
+void printPose(const rv1126b::PoseResult& pose, rv1126b::PostureState posture) {
+    std::cout << "\n========== POSE ==========\n";
+    std::cout << "valid=" << (pose.valid ? "true" : "false") << "\n";
+    std::cout << "has_person=" << (pose.has_person ? "true" : "false") << "\n";
+    std::cout << "person_score=" << pose.person_score << "\n";
+    std::cout << "person_box=" << boxText(pose.person_box) << "\n";
+    std::cout << "posture=" << postureText(posture) << "\n";
+    std::cout << "message=" << pose.message << "\n";
+    std::cout << "keypoints:\n";
+    for (std::size_t i = 0; i < pose.keypoints.size(); ++i) {
+        const auto& point = pose.keypoints[i];
+        std::cout << "  " << i << " " << kKeypointNames[i] << " "
+                  << std::fixed << std::setprecision(1)
+                  << point.x << " " << point.y << " "
+                  << std::setprecision(3) << point.score << "\n";
+    }
+}
+
+void printCup(const rv1126b::CupResult& cup) {
+    std::cout << "\n========== CUP ==========\n";
+    std::cout << "valid=" << (cup.valid ? "true" : "false") << "\n";
+    std::cout << "cup_count=" << cup.cups.size() << "\n";
+    std::cout << "best_box=" << boxText(cup.cup_box) << "\n";
+    std::cout << "message=" << cup.message << "\n";
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        std::cerr << "Usage: " << argv[0] << " /path/to/image.jpg\n";
+        return 1;
+    }
+
+#if !defined(RV1126B_HAS_OPENCV)
+    std::cerr << "single_image_ai_debug requires OpenCV. Rebuild with RV1126B_ENABLE_OPENCV=ON.\n";
+    return 1;
+#else
+    const std::string image_path = argv[1];
+    cv::Mat original_bgr = cv::imread(image_path, cv::IMREAD_COLOR);
+    if (original_bgr.empty()) {
+        std::cerr << "failed to read image: " << image_path << "\n";
+        return 1;
+    }
+
+    rv1126b::AppConfig config = makeDebugConfig();
+
+    rv1126b::Frame gesture_input;
+    rv1126b::Frame pose_input;
+    rv1126b::Frame cup_input;
+    makeRgbFrameFromImage(
+        original_bgr,
+        config.gesture_input_width,
+        config.gesture_input_height,
+        "/tmp/debug_gesture_input.jpg",
+        1,
+        gesture_input);
+    makeRgbFrameFromImage(
+        original_bgr,
+        config.pose_input_width,
+        config.pose_input_height,
+        "/tmp/debug_pose_input.jpg",
+        2,
+        pose_input);
+    makeRgbFrameFromImage(
+        original_bgr,
+        config.cup_input_width,
+        config.cup_input_height,
+        "/tmp/debug_cup_input.jpg",
+        3,
+        cup_input);
+
+    rv1126b::GestureModel gesture_model;
+    rv1126b::PoseModel pose_model;
+    rv1126b::CupModel cup_model;
+    rv1126b::PostureAnalyzer posture_analyzer;
+    rv1126b::DrinkDetector drink_detector;
+
+    gesture_model.load(config);
+    pose_model.load(config);
+    cup_model.load(config);
+    posture_analyzer.configure(config);
+    drink_detector.configure(config);
+
+    rv1126b::GestureResult gesture = gesture_model.infer(gesture_input);
+    rv1126b::PoseResult pose = pose_model.infer(pose_input);
+    rv1126b::CupResult cup = cup_model.infer(cup_input);
+
+    mapPoseToOriginal(pose, config.pose_input_width, config.pose_input_height, original_bgr.cols, original_bgr.rows);
+    mapCupToOriginal(cup, config.cup_input_width, config.cup_input_height, original_bgr.cols, original_bgr.rows);
+
+    const rv1126b::PostureState posture = posture_analyzer.update(pose);
+    rv1126b::DrinkState drink = rv1126b::DrinkState::Normal;
+    for (int i = 0; i < config.drink_consecutive_hits; ++i) {
+        drink = drink_detector.update(pose, cup);
+    }
+    const float distance_norm = estimateDrinkDistanceNorm(pose, cup, config.pose_keypoint_score_threshold);
+
+    std::cout << std::boolalpha;
+    std::cout << "========== IMAGE ==========\n";
+    std::cout << "path=" << image_path << "\n";
+    std::cout << "original=" << original_bgr.cols << "x" << original_bgr.rows << "\n";
+
+    std::cout << "\n========== GESTURE ==========\n";
+    std::cout << "valid=" << gesture.valid << "\n";
+    std::cout << "type=" << rv1126b::toString(gesture.type) << "\n";
+    std::cout << "name=" << gesture.gesture_name << "\n";
+    std::cout << "score=" << gesture.score << "\n";
+    std::cout << "message=\n";
+
+    printPose(pose, posture);
+    printCup(cup);
+
+    std::cout << "\n========== DRINK ==========\n";
+    std::cout << "drink_state=" << drinkText(drink) << "\n";
+    std::cout << "distance_rule_result=";
+    if (std::isnan(distance_norm)) {
+        std::cout << "unavailable";
+    } else {
+        std::cout << std::fixed << std::setprecision(3) << distance_norm
+                  << (distance_norm <= config.drink_distance_norm_threshold ? " <= " : " > ")
+                  << config.drink_distance_norm_threshold;
+    }
+    std::cout << "\n";
+
+    drawOverlay(original_bgr, gesture, pose, cup, posture, drink);
+    std::cout << "\noutputs=/tmp/debug_gesture_input.jpg,/tmp/debug_pose_input.jpg,/tmp/debug_cup_input.jpg,"
+              << "/tmp/single_image_ai_debug_overlay.jpg\n";
+    return 0;
+#endif
+}

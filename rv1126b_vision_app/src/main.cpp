@@ -41,6 +41,7 @@ int main() {
     config.enable_mpp_encoder = true;
     config.enable_mpp_decoder = false;
     config.enable_web_stream = true;
+    config.enable_video_overlay = true;
     config.input_stream_is_h264 = false;
     config.video_bitrate_kbps = 2048;
     config.video_gop = 30;
@@ -87,7 +88,7 @@ int main() {
 
     config.posture_drink_model_path = "/userdata/models/posture_drink.rknn";
     config.bad_posture_threshold = 0.60F;
-    config.cup_score_threshold = 0.50F;
+    config.cup_score_threshold = 0.25F;
     config.drink_distance_threshold = 120.0F;
     config.drink_distance_norm_threshold = 0.40F;
     config.drink_consecutive_hits = 3;

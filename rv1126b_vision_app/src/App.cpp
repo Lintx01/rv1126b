@@ -4,8 +4,10 @@
 
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <csignal>
 #include <cstdint>
+#include <cmath>
 #include <exception>
 #include <iostream>
 #include <sstream>
@@ -13,6 +15,11 @@
 #include <thread>
 #include <utility>
 #include <cstring>
+
+#if defined(RV1126B_HAS_OPENCV)
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#endif
 
 namespace rv1126b {
 
@@ -141,9 +148,17 @@ VisionApp::~VisionApp() {
 
 bool VisionApp::start() {
     try {
-        const std::size_t frame_bytes = static_cast<std::size_t>(config_.frame_width) *
-                                        static_cast<std::size_t>(config_.frame_height) *
-                                        static_cast<std::size_t>(config_.frame_channels);
+        const bool camera_uses_nv12 = !config_.input_stream_is_h264 && config_.frame_channels == 1;
+        const std::size_t frame_pixels = static_cast<std::size_t>(config_.frame_width) *
+                                         static_cast<std::size_t>(config_.frame_height);
+        const std::size_t frame_bytes = camera_uses_nv12
+                                            ? frame_pixels * 3U / 2U
+                                            : frame_pixels *
+                                                  static_cast<std::size_t>(config_.frame_channels);
+
+        std::cout << "[FramePool] frame_bytes=" << frame_bytes
+                  << ", format=" << (camera_uses_nv12 ? "NV12" : "configured")
+                  << "\n";
 
         FramePool::instance().initialize(
             8,
@@ -195,6 +210,18 @@ bool VisionApp::start() {
         if (!image_processor_.open(config_)) {
             throw std::runtime_error("image processor open failed");
         }
+
+#if defined(RV1126B_HAS_OPENCV)
+        overlay_runtime_enabled_ = config_.enable_video_overlay;
+        std::cout << "[Overlay] " << (overlay_runtime_enabled_ ? "enabled" : "disabled") << "\n";
+#else
+        overlay_runtime_enabled_ = false;
+        if (config_.enable_video_overlay) {
+            std::cout << "[Overlay] disabled because OpenCV is not available\n";
+        } else {
+            std::cout << "[Overlay] disabled\n";
+        }
+#endif
 
         if (config_.enable_display) {
             if (!display_.open(config_)) {
@@ -402,8 +429,14 @@ void VisionApp::encoderLoop() {
         }
         last_encoded_frame_id = frame_id;
 
+        Frame overlay_frame;
+        const Frame* encode_frame = item->get();
+        if (applyVideoOverlay(**item, overlay_frame)) {
+            encode_frame = &overlay_frame;
+        }
+
         EncodedPacket packet;
-        if (mpp_encoder_.encode(**item, packet)) {
+        if (mpp_encoder_.encode(*encode_frame, packet)) {
             web_.publishEncodedVideo(packet);
         } else if (config_.web_stream_protocol == WebStreamProtocol::HttpFlv) {
             if ((frame_id % 30U) == 0U) {
@@ -518,6 +551,8 @@ void VisionApp::aiLoop() {
                     gesture_result.gesture_name = "gesture_infer_unknown_exception";
                     std::cerr << "[AI] gesture infer unknown exception\n";
                 }
+
+                updateOverlayGesture(gesture_result);
 
                                 switch (gesture_result.type) {
                     case GestureType::Start:
@@ -757,6 +792,10 @@ void VisionApp::aiLoop() {
 
         web_.publishResult(result);
         enqueueAlarmMessages(result);
+        updateOverlayPerception(
+            last_pose_result,
+            last_cup_result,
+            buildAppState(&result, posture_state, drink_state, std::string()));
         publishDisplayState(&result, posture_state, drink_state, std::string());
     }
 }
@@ -961,6 +1000,249 @@ void VisionApp::publishDisplayState(
               << ", posture_state=" << static_cast<int>(state.posture_state)
               << ", drink_state=" << static_cast<int>(state.drink_state)
               << ", display_face=" << static_cast<int>(state.display_face) << "\n";
+}
+
+void VisionApp::updateOverlayGesture(const GestureResult& gesture) {
+    std::lock_guard<std::mutex> lock(overlay_mutex_);
+    latest_overlay_ai_.gesture = gesture;
+    latest_overlay_ai_.frame_id = gesture.frame_id;
+    latest_overlay_ai_.timestamp_ms = gesture.timestamp_ms;
+}
+
+void VisionApp::updateOverlayPerception(
+    const PoseResult& pose,
+    const CupResult& cup,
+    const AppState& state) {
+    std::lock_guard<std::mutex> lock(overlay_mutex_);
+    latest_overlay_ai_.pose = pose;
+    latest_overlay_ai_.cup = cup;
+    latest_overlay_ai_.frame_id = state.frame_id;
+    latest_overlay_ai_.timestamp_ms = state.timestamp_ms;
+    latest_overlay_state_ = state;
+}
+
+bool VisionApp::applyVideoOverlay(const Frame& src, Frame& dst) {
+    if (!overlay_runtime_enabled_) {
+        return false;
+    }
+
+#if defined(RV1126B_HAS_OPENCV)
+    if (src.width <= 0 || src.height <= 0 || src.data.empty()) {
+        return false;
+    }
+    if ((src.width % 2) != 0 || (src.height % 2) != 0) {
+        std::cerr << "[Overlay] disabled for odd frame size "
+                  << src.width << "x" << src.height << "\n";
+        return false;
+    }
+
+    AiResultBundle ai_snapshot;
+    AppState state_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(overlay_mutex_);
+        ai_snapshot = latest_overlay_ai_;
+        state_snapshot = latest_overlay_state_;
+    }
+
+    cv::Mat bgr;
+    try {
+        if (src.format == PixelFormat::NV12) {
+            const std::size_t required =
+                static_cast<std::size_t>(src.width) *
+                static_cast<std::size_t>(src.height) * 3U / 2U;
+            if (src.data.size() < required) {
+                return false;
+            }
+            cv::Mat nv12(src.height + src.height / 2, src.width, CV_8UC1,
+                         const_cast<uint8_t*>(src.data.data()));
+            cv::cvtColor(nv12, bgr, cv::COLOR_YUV2BGR_NV12);
+        } else if (src.format == PixelFormat::BGR888) {
+            if (src.channels < 3) {
+                return false;
+            }
+            cv::Mat input(src.height, src.width, CV_8UC3,
+                          const_cast<uint8_t*>(src.data.data()));
+            input.copyTo(bgr);
+        } else if (src.format == PixelFormat::RGB888) {
+            if (src.channels < 3) {
+                return false;
+            }
+            cv::Mat input(src.height, src.width, CV_8UC3,
+                          const_cast<uint8_t*>(src.data.data()));
+            cv::cvtColor(input, bgr, cv::COLOR_RGB2BGR);
+        } else {
+            return false;
+        }
+
+        auto clampRect = [&](const Box& box) {
+            const int x0 = std::clamp(static_cast<int>(std::round(box.x)), 0, src.width - 1);
+            const int y0 = std::clamp(static_cast<int>(std::round(box.y)), 0, src.height - 1);
+            const int x1 = std::clamp(static_cast<int>(std::round(box.x + box.w)), 0, src.width - 1);
+            const int y1 = std::clamp(static_cast<int>(std::round(box.y + box.h)), 0, src.height - 1);
+            return cv::Rect(cv::Point(std::min(x0, x1), std::min(y0, y1)),
+                            cv::Point(std::max(x0 + 1, x1), std::max(y0 + 1, y1)));
+        };
+
+        auto drawLabel = [&](const std::string& text, int x, int y, const cv::Scalar& color) {
+            if (text.empty()) {
+                return;
+            }
+            const int baseline = 0;
+            const cv::Point origin(std::clamp(x, 0, std::max(0, src.width - 1)),
+                                   std::clamp(y, 12, std::max(12, src.height - 1)));
+            cv::putText(bgr, text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+            cv::putText(bgr, text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv::LINE_AA);
+            (void)baseline;
+        };
+
+        const cv::Scalar person_color(0, 255, 0);
+        const cv::Scalar cup_color(255, 160, 0);
+        const cv::Scalar keypoint_color(0, 255, 255);
+        const cv::Scalar skeleton_color(255, 255, 0);
+        const cv::Scalar text_color(255, 255, 255);
+
+        if (ai_snapshot.pose.has_value() && ai_snapshot.pose->valid && ai_snapshot.pose->has_person) {
+            const cv::Rect rect = clampRect(ai_snapshot.pose->person_box);
+            cv::rectangle(bgr, rect, person_color, 2);
+            drawLabel("person", rect.x, std::max(14, rect.y - 4), person_color);
+
+            static const std::array<std::pair<int, int>, 16> skeleton{{
+                {0, 1}, {0, 2}, {1, 3}, {2, 4},
+                {5, 6}, {5, 7}, {7, 9}, {6, 8},
+                {8, 10}, {5, 11}, {6, 12}, {11, 12},
+                {11, 13}, {13, 15}, {12, 14}, {14, 16}
+            }};
+
+            auto validKeypoint = [&](int index) {
+                return index >= 0 &&
+                       index < static_cast<int>(ai_snapshot.pose->keypoints.size()) &&
+                       ai_snapshot.pose->keypoints[static_cast<std::size_t>(index)].score >=
+                           config_.pose_keypoint_score_threshold;
+            };
+
+            for (const auto& link : skeleton) {
+                if (!validKeypoint(link.first) || !validKeypoint(link.second)) {
+                    continue;
+                }
+                const PoseKeypoint& a = ai_snapshot.pose->keypoints[static_cast<std::size_t>(link.first)];
+                const PoseKeypoint& b = ai_snapshot.pose->keypoints[static_cast<std::size_t>(link.second)];
+                cv::line(bgr,
+                         cv::Point(static_cast<int>(std::round(a.x)), static_cast<int>(std::round(a.y))),
+                         cv::Point(static_cast<int>(std::round(b.x)), static_cast<int>(std::round(b.y))),
+                         skeleton_color,
+                         2,
+                         cv::LINE_AA);
+            }
+
+            for (const PoseKeypoint& keypoint : ai_snapshot.pose->keypoints) {
+                if (keypoint.score < config_.pose_keypoint_score_threshold) {
+                    continue;
+                }
+                const int x = std::clamp(static_cast<int>(std::round(keypoint.x)), 0, src.width - 1);
+                const int y = std::clamp(static_cast<int>(std::round(keypoint.y)), 0, src.height - 1);
+                cv::circle(bgr, cv::Point(x, y), 3, keypoint_color, -1, cv::LINE_AA);
+            }
+        }
+
+        if (ai_snapshot.cup.has_value() && ai_snapshot.cup->valid) {
+            std::vector<Box> cups = ai_snapshot.cup->cups;
+            if (cups.empty() && ai_snapshot.cup->cup_box.w > 0.0F && ai_snapshot.cup->cup_box.h > 0.0F) {
+                cups.push_back(ai_snapshot.cup->cup_box);
+            }
+            for (const Box& cup : cups) {
+                const cv::Rect rect = clampRect(cup);
+                cv::rectangle(bgr, rect, cup_color, 2);
+                drawLabel(cup.label.empty() ? "cup" : cup.label, rect.x, std::max(14, rect.y - 4), cup_color);
+            }
+        }
+
+        const auto postureText = [](PostureState state) {
+            switch (state) {
+                case PostureState::Good:
+                    return "NORMAL";
+                case PostureState::BadPending:
+                case PostureState::BadAlert:
+                    return "HUNCHBACK";
+                case PostureState::Unknown:
+                    return "UNKNOWN";
+            }
+            return "UNKNOWN";
+        };
+
+        const auto drinkText = [](DrinkState state) {
+            switch (state) {
+                case DrinkState::DrinkDetected:
+                    return "DRINKING";
+                case DrinkState::NeedRemind:
+                    return "NEED_DRINK";
+                case DrinkState::Normal:
+                    return "NO_DRINK";
+            }
+            return "UNKNOWN";
+        };
+
+        std::string gesture_text = "none";
+        if (ai_snapshot.gesture.has_value()) {
+            gesture_text = ai_snapshot.gesture->gesture_name.empty()
+                               ? toString(ai_snapshot.gesture->type)
+                               : ai_snapshot.gesture->gesture_name;
+        }
+
+        const bool ai_running =
+            state_.load() == SystemState::Running ||
+            ai_snapshot.pose.has_value() ||
+            ai_snapshot.cup.has_value() ||
+            ai_snapshot.gesture.has_value();
+
+        int text_y = 22;
+        drawLabel("AI: " + std::string(ai_running ? "running" : "idle"), 10, text_y, text_color);
+        text_y += 20;
+        drawLabel("Frame: " + std::to_string(src.id), 10, text_y, text_color);
+        text_y += 20;
+        drawLabel("Gesture: " + gesture_text, 10, text_y, text_color);
+        text_y += 20;
+        drawLabel("Posture: " + std::string(postureText(state_snapshot.posture_state)), 10, text_y, text_color);
+        text_y += 20;
+        drawLabel("Drink: " + std::string(drinkText(state_snapshot.drink_state)), 10, text_y, text_color);
+
+        cv::Mat i420;
+        cv::cvtColor(bgr, i420, cv::COLOR_BGR2YUV_I420);
+
+        const std::size_t y_size = static_cast<std::size_t>(src.width) *
+                                   static_cast<std::size_t>(src.height);
+        const std::size_t uv_plane_size = y_size / 4U;
+        dst.id = src.id;
+        dst.width = src.width;
+        dst.height = src.height;
+        dst.channels = 1;
+        dst.format = PixelFormat::NV12;
+        dst.timestamp_ms = src.timestamp_ms;
+        dst.data.resize(y_size + y_size / 2U);
+
+        const uint8_t* y_plane = i420.data;
+        const uint8_t* u_plane = y_plane + y_size;
+        const uint8_t* v_plane = u_plane + uv_plane_size;
+        std::memcpy(dst.data.data(), y_plane, y_size);
+        for (int y = 0; y < src.height / 2; ++y) {
+            for (int x = 0; x < src.width / 2; ++x) {
+                const std::size_t uv_index =
+                    y_size + static_cast<std::size_t>(y * src.width + x * 2);
+                const std::size_t src_index =
+                    static_cast<std::size_t>(y * (src.width / 2) + x);
+                dst.data[uv_index + 0] = u_plane[src_index];
+                dst.data[uv_index + 1] = v_plane[src_index];
+            }
+        }
+        return true;
+    } catch (const cv::Exception& e) {
+        std::cerr << "[Overlay] OpenCV draw failed: " << e.what() << "\n";
+        return false;
+    }
+#else
+    (void)src;
+    (void)dst;
+    return false;
+#endif
 }
 
 DisplayFace VisionApp::selectDisplayFace(const AppState& state) const {

@@ -10,7 +10,9 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -67,24 +69,43 @@ bool sendAllString(int fd, const std::string& text) {
 }
 
 std::string readHttpRequestLine(int fd) {
-    std::string request;
-    request.reserve(512);
+    std::string first_line;
+    std::string header;
+    header.reserve(1024);
 
     char ch = 0;
-    while (request.size() < 4096) {
+    while (header.size() < 8192) {
         const ssize_t n = ::recv(fd, &ch, 1, 0);
         if (n <= 0) {
             break;
         }
-        request.push_back(ch);
-        if (request.size() >= 2 &&
-            request[request.size() - 2] == '\r' &&
-            request[request.size() - 1] == '\n') {
+
+        header.push_back(ch);
+        if (first_line.empty() &&
+            header.size() >= 2 &&
+            header[header.size() - 2] == '\r' &&
+            header[header.size() - 1] == '\n') {
+            first_line.assign(header.begin(), header.end() - 2);
+        }
+
+        if (header.size() >= 4 &&
+            header[header.size() - 4] == '\r' &&
+            header[header.size() - 3] == '\n' &&
+            header[header.size() - 2] == '\r' &&
+            header[header.size() - 1] == '\n') {
             break;
         }
     }
 
-    return request;
+    return first_line.empty() ? header : first_line;
+}
+
+std::string requestMethodFromLine(const std::string& request_line) {
+    std::istringstream iss(request_line);
+    std::string method;
+    std::string path;
+    iss >> method >> path;
+    return method;
 }
 
 std::string requestPathFromLine(const std::string& request_line) {
@@ -92,8 +113,12 @@ std::string requestPathFromLine(const std::string& request_line) {
     std::string method;
     std::string path;
     iss >> method >> path;
-    if (method != "GET" || path.empty()) {
+    if ((method != "GET" && method != "HEAD") || path.empty()) {
         return {};
+    }
+    const std::size_t query_pos = path.find('?');
+    if (query_pos != std::string::npos) {
+        path.resize(query_pos);
     }
     return path;
 }
@@ -112,6 +137,78 @@ std::string makeHttpHeader(const std::string& status, const std::string& content
 bool sendSimpleResponse(int fd, const std::string& status, const std::string& content_type, const std::string& body) {
     return sendAllString(fd, makeHttpHeader(status, content_type, body.size())) &&
            sendAllString(fd, body);
+}
+
+bool sendFlvJs(int fd, bool head_only) {
+    const std::string path = "web/flv.min.js";
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        std::cerr << "[Web][HTTP-FLV] flv.min.js not found: " << path << "\n";
+        return sendSimpleResponse(fd, "404 Not Found", "text/plain", "not found\n");
+    }
+
+    const std::streamoff file_size = file.tellg();
+    if (file_size < 0) {
+        return sendSimpleResponse(fd, "500 Internal Server Error", "text/plain", "read error\n");
+    }
+
+    std::vector<uint8_t> bytes(static_cast<std::size_t>(file_size));
+    file.seekg(0, std::ios::beg);
+    if (!bytes.empty()) {
+        file.read(
+            reinterpret_cast<char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+        if (file.gcount() != static_cast<std::streamsize>(bytes.size())) {
+            return sendSimpleResponse(fd, "500 Internal Server Error", "text/plain", "read error\n");
+        }
+    }
+
+    const std::string header =
+        "HTTP/1.1 200 OK\r\n"
+        "Server: rv1126b_vision_app\r\n"
+        "Connection: close\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Pragma: no-cache\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Content-Type: application/javascript\r\n"
+        "Content-Length: " + std::to_string(bytes.size()) + "\r\n"
+        "\r\n";
+
+    return sendAllString(fd, header) &&
+           (head_only || bytes.empty() || sendAll(fd, bytes.data(), bytes.size()));
+}
+
+bool hasAnnexBIdr(const uint8_t* data, std::size_t size) {
+    if (data == nullptr || size < 5) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i + 4 < size; ++i) {
+        std::size_t start_code_size = 0;
+        if (i + 3 < size &&
+            data[i] == 0x00 &&
+            data[i + 1] == 0x00 &&
+            data[i + 2] == 0x01) {
+            start_code_size = 3;
+        } else if (i + 4 < size &&
+                   data[i] == 0x00 &&
+                   data[i + 1] == 0x00 &&
+                   data[i + 2] == 0x00 &&
+                   data[i + 3] == 0x01) {
+            start_code_size = 4;
+        }
+
+        if (start_code_size == 0 || i + start_code_size >= size) {
+            continue;
+        }
+
+        const uint8_t nalu_type = data[i + start_code_size] & 0x1FU;
+        if (nalu_type == 5) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 std::string makeIndexHtml(const AppConfig& config) {
@@ -138,10 +235,10 @@ std::string makeIndexHtml(const AppConfig& config) {
 <body>
   <main>
     <h1>RV1126B HTTP-FLV</h1>
-    <video id="video" controls autoplay muted playsinline></video>
+    <video id="video" controls muted playsinline></video>
     <div class="row">
       <button id="play">Play</button>
-      <span id="status">initializing</span>
+      <span id="status">ready, click Play</span>
     </div>
     <p>FLV stream: <a href="/live.flv">/live.flv</a></p>
     <p>ffplay:</p>
@@ -149,24 +246,43 @@ std::string makeIndexHtml(const AppConfig& config) {
     <p>state:</p>
     <pre id="state">{}</pre>
   </main>
-  <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+  <script src="/flv.min.js"></script>
   <script>
     const statusEl = document.getElementById('status');
     const video = document.getElementById('video');
+    const playButton = document.getElementById('play');
     let player = null;
+    let starting = false;
 
     function setStatus(text) {
       statusEl.textContent = text;
     }
 
     function startPlayer() {
+      if (starting) {
+        setStatus('starting');
+        return;
+      }
+      starting = true;
+      playButton.disabled = true;
+
+      function finishStart() {
+        starting = false;
+        playButton.disabled = false;
+      }
+
       if (!window.flvjs || !flvjs.isSupported()) {
         setStatus('flv.js is unavailable or this browser does not support MSE');
+        finishStart();
         return;
       }
       if (player) {
-        player.destroy();
-        player = null;
+        video.play().then(function() {
+          setStatus(video.paused ? 'ready, click Play' : 'already playing');
+        }).catch(function(err) {
+          setStatus('click Play: ' + err.message);
+        }).finally(finishStart);
+        return;
       }
       player = flvjs.createPlayer({
         type: 'flv',
@@ -179,6 +295,7 @@ std::string makeIndexHtml(const AppConfig& config) {
       });
       player.on(flvjs.Events.ERROR, function(type, detail) {
         setStatus('player error: ' + type + ' / ' + detail);
+        finishStart();
       });
       player.attachMediaElement(video);
       player.load();
@@ -186,11 +303,10 @@ std::string makeIndexHtml(const AppConfig& config) {
         setStatus('playing /live.flv');
       }).catch(function(err) {
         setStatus('click Play: ' + err.message);
-      });
+      }).finally(finishStart);
     }
 
     document.getElementById('play').addEventListener('click', startPlayer);
-    window.addEventListener('load', startPlayer);
 
     async function refreshState() {
       try {
@@ -533,15 +649,26 @@ bool WebStreamer::start(const AppConfig& config) {
                 }
 
                 const std::string request_line = readHttpRequestLine(client_fd);
+                const std::string method = requestMethodFromLine(request_line);
                 const std::string path = requestPathFromLine(request_line);
 
                 if (path == "/" || path == "/index.html") {
+                    if (method != "GET") {
+                        sendSimpleResponse(client_fd, "404 Not Found", "text/plain", "not found\n");
+                        closeFd(client_fd);
+                        continue;
+                    }
                     sendSimpleResponse(client_fd, "200 OK", "text/html; charset=utf-8", makeIndexHtml(config_));
                     closeFd(client_fd);
                     continue;
                 }
 
                 if (path == "/state.json") {
+                    if (method != "GET") {
+                        sendSimpleResponse(client_fd, "404 Not Found", "text/plain", "not found\n");
+                        closeFd(client_fd);
+                        continue;
+                    }
                     std::string body = "{}";
                     {
                         std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -554,7 +681,13 @@ bool WebStreamer::start(const AppConfig& config) {
                     continue;
                 }
 
-                if (path != "/live.flv") {
+                if (path == "/flv.min.js") {
+                    sendFlvJs(client_fd, method == "HEAD");
+                    closeFd(client_fd);
+                    continue;
+                }
+
+                if (path != "/live.flv" || method != "GET") {
                     sendSimpleResponse(client_fd, "404 Not Found", "text/plain", "not found\n");
                     closeFd(client_fd);
                     continue;
@@ -578,6 +711,7 @@ bool WebStreamer::start(const AppConfig& config) {
                     std::cout << "[Web][HTTP-FLV] client disconnected\n";
                     continue;
                 }
+                std::cout << "[Web][HTTP-FLV] send flv header\n";
 
                 {
                     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -588,6 +722,18 @@ bool WebStreamer::start(const AppConfig& config) {
                     impl_->flv_waiting_for_key_frame = true;
                     impl_->flv_has_base_timestamp = false;
                     impl_->flv_base_timestamp_ms = 0;
+                    if (impl_->flv_muxer.hasSequenceHeader()) {
+                        auto sequence = impl_->flv_muxer.makeSequenceHeaderTag(0);
+                        if (!sequence.empty()) {
+                            impl_->flv_chunks.push_back(std::move(sequence));
+                            impl_->flv_sequence_sent = true;
+                            std::cout << "[Web][HTTP-FLV] send avc sequence header\n";
+                            std::cout << "[Web][HTTP-FLV] wait keyframe for new client\n";
+                            impl_->cv.notify_all();
+                        }
+                    } else {
+                        std::cout << "[Web][HTTP-FLV] wait keyframe for new client\n";
+                    }
                 }
 
                 while (impl_->server_running) {
@@ -827,15 +973,31 @@ void WebStreamer::publishEncodedVideo(const EncodedPacket& packet) {
     }
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (packet.key_frame) {
-        impl_->flv_muxer.updateSpsPpsFromAnnexB(packet.data.data(), packet.data.size());
+    if (impl_->flv_muxer.updateSpsPpsFromAnnexB(packet.data.data(), packet.data.size())) {
+        std::cout << "[Web][HTTP-FLV] cached sps/pps\n";
     }
 
     if (impl_->client_fd < 0) {
         return;
     }
 
-    if (impl_->flv_waiting_for_key_frame && !packet.key_frame) {
+    if (!impl_->flv_sequence_sent && impl_->flv_muxer.hasSequenceHeader()) {
+        auto sequence = impl_->flv_muxer.makeSequenceHeaderTag(0);
+        if (!sequence.empty()) {
+            impl_->flv_chunks.push_back(std::move(sequence));
+            impl_->flv_sequence_sent = true;
+            std::cout << "[Web][HTTP-FLV] send avc sequence header\n";
+            std::cout << "[Web][HTTP-FLV] wait keyframe for new client\n";
+        }
+    }
+
+    if (!impl_->flv_sequence_sent) {
+        return;
+    }
+
+    const bool has_idr = hasAnnexBIdr(packet.data.data(), packet.data.size());
+    const bool is_key_frame = packet.key_frame || has_idr;
+    if (impl_->flv_waiting_for_key_frame && !has_idr) {
         return;
     }
 
@@ -850,25 +1012,11 @@ void WebStreamer::publishEncodedVideo(const EncodedPacket& packet) {
             : 0;
     const uint32_t flv_timestamp = static_cast<uint32_t>(rel_timestamp);
 
-    if (!impl_->flv_sequence_sent && impl_->flv_muxer.hasSequenceHeader()) {
-        auto sequence = impl_->flv_muxer.makeSequenceHeaderTag(0);
-        if (!sequence.empty()) {
-            impl_->flv_chunks.push_back(std::move(sequence));
-            impl_->flv_sequence_sent = true;
-            impl_->flv_waiting_for_key_frame = false;
-            std::cout << "[Web][HTTP-FLV] send sequence header\n";
-        }
-    }
-
-    if (!impl_->flv_sequence_sent) {
-        return;
-    }
-
     auto video_tag = impl_->flv_muxer.makeVideoTagFromAnnexB(
         packet.data.data(),
         packet.data.size(),
         flv_timestamp,
-        packet.key_frame);
+        is_key_frame);
 
     if (video_tag.empty()) {
         return;
@@ -882,11 +1030,16 @@ void WebStreamer::publishEncodedVideo(const EncodedPacket& packet) {
         impl_->flv_chunks.pop_front();
     }
 
+    if (impl_->flv_waiting_for_key_frame && has_idr) {
+        impl_->flv_waiting_for_key_frame = false;
+        std::cout << "[Web][HTTP-FLV] first keyframe sent\n";
+    }
+
     impl_->cv.notify_all();
 
-    if (packet.key_frame || (packet.frame_id % 30U) == 0U) {
+    if (is_key_frame || (packet.frame_id % 30U) == 0U) {
         std::cout << "[Web][HTTP-FLV] send video frame=" << packet.frame_id
-                  << ", key=" << (packet.key_frame ? "true" : "false")
+                  << ", key=" << (is_key_frame ? "true" : "false")
                   << ", size=" << video_tag_size << "\n";
     }
 }
