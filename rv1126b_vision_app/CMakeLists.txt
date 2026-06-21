@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(rv1126b_vision_app LANGUAGES CXX)
+project(rv1126b_vision_app LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,7 @@ option(RV1126B_ENABLE_RKNN "Enable RKNN model inference when headers and library
 option(RV1126B_ENABLE_MQTT "Enable libmosquitto MQTT client when headers and library are available" ON)
 option(RV1126B_ENABLE_MPP "Enable Rockchip MPP H264 encoder when headers and library are available" ON)
 option(RV1126B_ENABLE_GSTREAMER_RTSP "Build GStreamer RTSP relay tool" OFF)
+option(RV1126B_ENABLE_LVGL "Enable optional LVGL display backend" OFF)
 
 set(RV1126B_LOCAL_RKNN_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rknn/include")
 set(RV1126B_LOCAL_RKNN_LIBRARY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rknn/lib")
@@ -32,6 +33,55 @@ add_executable(rv1126b_vision_app
 )
 
 target_include_directories(rv1126b_vision_app PRIVATE include)
+
+if (RV1126B_ENABLE_LVGL)
+    if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl")
+        message(FATAL_ERROR "LVGL requested but third_party/lvgl not found.")
+    endif()
+
+    if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/lv_conf.h")
+        message(FATAL_ERROR "LVGL requested but lv_conf.h not found.")
+    endif()
+
+    file(GLOB_RECURSE RV1126B_LVGL_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/*.c"
+    )
+
+    if (NOT RV1126B_LVGL_SOURCES)
+        message(FATAL_ERROR "LVGL requested but no source files found under third_party/lvgl/src.")
+    endif()
+
+    add_library(rv1126b_lvgl STATIC
+        ${RV1126B_LVGL_SOURCES}
+    )
+
+    target_include_directories(rv1126b_lvgl PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl
+    )
+
+    target_compile_definitions(rv1126b_lvgl PUBLIC
+        LV_CONF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/lv_conf.h"
+        LV_COLOR_DEPTH=16
+    )
+
+    target_include_directories(rv1126b_vision_app PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl
+    )
+
+    target_compile_definitions(rv1126b_vision_app PRIVATE
+        RV1126B_HAS_LVGL=1
+        LV_CONF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/lv_conf.h"
+        LV_COLOR_DEPTH=16
+    )
+
+    target_link_libraries(rv1126b_vision_app PRIVATE
+        rv1126b_lvgl
+    )
+
+    message(STATUS "LVGL enabled: ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl")
+endif()
 
 if (RV1126B_ENABLE_RGA)
     find_path(RGA_INCLUDE_DIR NAMES im2d.h PATH_SUFFIXES rga)
