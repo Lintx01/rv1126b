@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -163,6 +164,36 @@ void prepareRgbDestination(const Frame& src, int dst_width, int dst_height, Fram
     dst.format = PixelFormat::RGB888;
     dst.timestamp_ms = src.timestamp_ms;
     dst.data.resize(static_cast<std::size_t>(dst_width) * static_cast<std::size_t>(dst_height) * 3U);
+}
+
+struct LetterboxLayout {
+    CropRect crop;
+    int resized_width{0};
+    int resized_height{0};
+    int pad_x{0};
+    int pad_y{0};
+};
+
+LetterboxLayout makeLetterboxLayout(const Frame& src, const CropRect& crop, int dst_width, int dst_height) {
+    LetterboxLayout layout;
+    layout.crop = crop;
+    if (layout.crop.width <= 0 || layout.crop.height <= 0) {
+        layout.crop = CropRect{0, 0, src.width, src.height};
+    }
+    layout.crop.x = std::clamp(layout.crop.x, 0, std::max(0, src.width - 1));
+    layout.crop.y = std::clamp(layout.crop.y, 0, std::max(0, src.height - 1));
+    layout.crop.width = std::clamp(layout.crop.width, 1, src.width - layout.crop.x);
+    layout.crop.height = std::clamp(layout.crop.height, 1, src.height - layout.crop.y);
+    const float scale = std::min(
+        static_cast<float>(dst_width) / static_cast<float>(std::max(1, layout.crop.width)),
+        static_cast<float>(dst_height) / static_cast<float>(std::max(1, layout.crop.height)));
+    layout.resized_width = std::max(1, static_cast<int>(std::round(static_cast<float>(layout.crop.width) * scale)));
+    layout.resized_height = std::max(1, static_cast<int>(std::round(static_cast<float>(layout.crop.height) * scale)));
+    layout.resized_width = std::min(layout.resized_width, dst_width);
+    layout.resized_height = std::min(layout.resized_height, dst_height);
+    layout.pad_x = (dst_width - layout.resized_width) / 2;
+    layout.pad_y = (dst_height - layout.resized_height) / 2;
+    return layout;
 }
 
 CropRect makeRgaSafeCrop(const Frame& src, const CropRect& crop) {
@@ -472,6 +503,7 @@ bool ImageProcessor::open(const AppConfig& config) {
 
     std::cout << "[ImageProcessor] rga=" << (rga_available_ ? "enabled" : "disabled")
               << ", opencv_fallback=" << (config.fallback_to_opencv ? "true" : "false")
+              << ", geometry=" << (config.use_letterbox_preprocess ? "letterbox" : "resize")
 #if defined(RV1126B_HAS_OPENCV)
               << ", opencv=available"
 #else
@@ -484,6 +516,13 @@ bool ImageProcessor::open(const AppConfig& config) {
 bool ImageProcessor::cropResize(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst) {
     if (!opened_ || src.data.empty() || dst_width <= 0 || dst_height <= 0) {
         return false;
+    }
+
+    if (config_.use_letterbox_preprocess) {
+        if (config_.fallback_to_opencv && cropResizeLetterboxByOpenCv(src, crop, dst_width, dst_height, dst)) {
+            return true;
+        }
+        return cropResizeLetterboxBySoftware(src, crop, dst_width, dst_height, dst);
     }
 
     if (rga_available_ && cropResizeByRga(src, crop, dst_width, dst_height, dst)) {
@@ -706,6 +745,155 @@ bool ImageProcessor::cropResizeByOpenCv(
     (void)dst;
     return false;
 #endif
+}
+
+bool ImageProcessor::cropResizeLetterboxByOpenCv(
+    const Frame& src,
+    const CropRect& crop,
+    int dst_width,
+    int dst_height,
+    Frame& dst) {
+#if defined(RV1126B_HAS_OPENCV)
+    if (src.data.empty() || src.width <= 0 || src.height <= 0 ||
+        dst_width <= 0 || dst_height <= 0) {
+        return false;
+    }
+
+    const LetterboxLayout layout = makeLetterboxLayout(src, crop, dst_width, dst_height);
+
+    cv::Mat rgb_src;
+
+    if (src.format == PixelFormat::RGB888 || src.format == PixelFormat::BGR888) {
+        if (src.channels < 3) {
+            return false;
+        }
+
+        cv::Mat input(
+            src.height,
+            src.width,
+            CV_8UC3,
+            const_cast<uint8_t*>(src.data.data()));
+
+        if (src.format == PixelFormat::RGB888) {
+            rgb_src = input;
+        } else {
+            cv::cvtColor(input, rgb_src, cv::COLOR_BGR2RGB);
+        }
+    } else if (src.format == PixelFormat::NV12) {
+        const std::size_t required_size =
+            static_cast<std::size_t>(src.width) *
+            static_cast<std::size_t>(src.height) * 3U / 2U;
+
+        if (src.data.size() < required_size) {
+            std::cerr << "[OpenCV] NV12 data too small, data="
+                      << src.data.size()
+                      << ", required=" << required_size << "\n";
+            return false;
+        }
+
+        cv::Mat nv12(
+            src.height + src.height / 2,
+            src.width,
+            CV_8UC1,
+            const_cast<uint8_t*>(src.data.data()));
+
+        cv::cvtColor(nv12, rgb_src, cv::COLOR_YUV2RGB_NV12);
+    } else {
+        std::cerr << "[OpenCV] unsupported source format="
+                  << static_cast<int>(src.format) << "\n";
+        return false;
+    }
+
+    cv::Rect roi(layout.crop.x, layout.crop.y, layout.crop.width, layout.crop.height);
+    if (roi.x < 0 || roi.y < 0 ||
+        roi.x + roi.width > rgb_src.cols ||
+        roi.y + roi.height > rgb_src.rows) {
+        std::cerr << "[OpenCV] invalid letterbox crop roi\n";
+        return false;
+    }
+
+    cv::Mat resized;
+    cv::resize(
+        rgb_src(roi),
+        resized,
+        cv::Size(layout.resized_width, layout.resized_height),
+        0,
+        0,
+        cv::INTER_LINEAR);
+
+    cv::Mat canvas(dst_height, dst_width, CV_8UC3, cv::Scalar(114, 114, 114));
+    cv::Rect paste_roi(layout.pad_x, layout.pad_y, layout.resized_width, layout.resized_height);
+    resized.copyTo(canvas(paste_roi));
+
+    dst.id = src.id;
+    dst.width = dst_width;
+    dst.height = dst_height;
+    dst.channels = 3;
+    dst.format = PixelFormat::RGB888;
+    dst.timestamp_ms = src.timestamp_ms;
+
+    const std::size_t output_size =
+        static_cast<std::size_t>(dst_width) *
+        static_cast<std::size_t>(dst_height) * 3U;
+
+    dst.data.resize(output_size);
+    std::memcpy(dst.data.data(), canvas.data, output_size);
+
+    return true;
+#else
+    (void)src;
+    (void)crop;
+    (void)dst_width;
+    (void)dst_height;
+    (void)dst;
+    return false;
+#endif
+}
+
+bool ImageProcessor::cropResizeLetterboxBySoftware(
+    const Frame& src,
+    const CropRect& crop,
+    int dst_width,
+    int dst_height,
+    Frame& dst) {
+    if (src.data.empty() || src.width <= 0 || src.height <= 0 ||
+        dst_width <= 0 || dst_height <= 0) {
+        return false;
+    }
+
+    const LetterboxLayout layout = makeLetterboxLayout(src, crop, dst_width, dst_height);
+
+    Frame resized;
+    if (!cropResizeBySoftware(src, layout.crop, layout.resized_width, layout.resized_height, resized)) {
+        return false;
+    }
+
+    dst.id = src.id;
+    dst.width = dst_width;
+    dst.height = dst_height;
+    dst.channels = 3;
+    dst.format = PixelFormat::RGB888;
+    dst.timestamp_ms = src.timestamp_ms;
+    dst.data.assign(
+        static_cast<std::size_t>(dst_width) *
+        static_cast<std::size_t>(dst_height) * 3U,
+        114U);
+
+    for (int y = 0; y < layout.resized_height; ++y) {
+        const std::size_t src_offset =
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(layout.resized_width) * 3U;
+        const std::size_t dst_offset =
+            static_cast<std::size_t>(layout.pad_y + y) *
+            static_cast<std::size_t>(dst_width) * 3U +
+            static_cast<std::size_t>(layout.pad_x) * 3U;
+        std::memcpy(
+            dst.data.data() + dst_offset,
+            resized.data.data() + src_offset,
+            static_cast<std::size_t>(layout.resized_width) * 3U);
+    }
+
+    return true;
 }
 
 bool ImageProcessor::cropResizeBySoftware(

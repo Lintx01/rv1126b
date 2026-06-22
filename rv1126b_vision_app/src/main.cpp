@@ -47,6 +47,7 @@ int main() {
     config.video_gop = 30;
 
     const char* preprocess_mode = std::getenv("RV_PREPROCESS_MODE");
+    const char* preprocess_geometry = std::getenv("RV_PREPROCESS_GEOMETRY");
 
     if (preprocess_mode != nullptr && std::strcmp(preprocess_mode, "rga") == 0) {
         config.use_rga_preprocess = true;
@@ -60,6 +61,14 @@ int main() {
         config.use_rga_preprocess = false;
         config.fallback_to_opencv = true;
         std::cout << "[Config] preprocess_mode=opencv(default)\n";
+    }
+
+    if (preprocess_geometry != nullptr && std::strcmp(preprocess_geometry, "letterbox") == 0) {
+        config.use_letterbox_preprocess = true;
+        std::cout << "[Config] preprocess_geometry=letterbox\n";
+    } else {
+        config.use_letterbox_preprocess = false;
+        std::cout << "[Config] preprocess_geometry=resize(default)\n";
     }
 
     config.web_stream_protocol = rv1126b::WebStreamProtocol::HttpFlv;

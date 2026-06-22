@@ -35,10 +35,15 @@ float clampFloat(float value, float low, float high) {
     return std::max(low, std::min(value, high));
 }
 
-PreprocessTransform makeTransform(const Frame& source, const CropRect& crop, const Frame& model_input) {
+PreprocessTransform makeTransform(
+    const Frame& source,
+    const CropRect& crop,
+    const Frame& model_input,
+    bool letterbox) {
     PreprocessTransform transform;
     transform.source_width = source.width;
     transform.source_height = source.height;
+    transform.letterbox = letterbox;
     transform.source_crop = crop;
     if (transform.source_crop.width <= 0 || transform.source_crop.height <= 0) {
         transform.source_crop = CropRect{0, 0, source.width, source.height};
@@ -49,6 +54,19 @@ PreprocessTransform makeTransform(const Frame& source, const CropRect& crop, con
     transform.source_crop.height = std::clamp(transform.source_crop.height, 1, source.height - transform.source_crop.y);
     transform.model_width = model_input.width;
     transform.model_height = model_input.height;
+    if (letterbox && model_input.width > 0 && model_input.height > 0) {
+        transform.scale = std::min(
+            static_cast<float>(model_input.width) / static_cast<float>(std::max(1, transform.source_crop.width)),
+            static_cast<float>(model_input.height) / static_cast<float>(std::max(1, transform.source_crop.height)));
+        const int resized_width = std::min(
+            model_input.width,
+            std::max(1, static_cast<int>(std::round(static_cast<float>(transform.source_crop.width) * transform.scale))));
+        const int resized_height = std::min(
+            model_input.height,
+            std::max(1, static_cast<int>(std::round(static_cast<float>(transform.source_crop.height) * transform.scale))));
+        transform.pad_x = static_cast<float>((model_input.width - resized_width) / 2);
+        transform.pad_y = static_cast<float>((model_input.height - resized_height) / 2);
+    }
     transform.valid = source.width > 0 && source.height > 0 &&
                       crop.width > 0 && crop.height > 0 &&
                       model_input.width > 0 && model_input.height > 0;
@@ -60,13 +78,19 @@ Point mapPointToOriginal(const Point& point, const PreprocessTransform& transfor
         return point;
     }
 
-    const float x_scale = static_cast<float>(transform.source_crop.width) /
-                          static_cast<float>(transform.model_width);
-    const float y_scale = static_cast<float>(transform.source_crop.height) /
-                          static_cast<float>(transform.model_height);
     Point mapped;
-    mapped.x = static_cast<float>(transform.source_crop.x) + point.x * x_scale;
-    mapped.y = static_cast<float>(transform.source_crop.y) + point.y * y_scale;
+    if (transform.letterbox) {
+        const float scale = std::max(1.0e-6F, transform.scale);
+        mapped.x = static_cast<float>(transform.source_crop.x) + (point.x - transform.pad_x) / scale;
+        mapped.y = static_cast<float>(transform.source_crop.y) + (point.y - transform.pad_y) / scale;
+    } else {
+        const float x_scale = static_cast<float>(transform.source_crop.width) /
+                              static_cast<float>(transform.model_width);
+        const float y_scale = static_cast<float>(transform.source_crop.height) /
+                              static_cast<float>(transform.model_height);
+        mapped.x = static_cast<float>(transform.source_crop.x) + point.x * x_scale;
+        mapped.y = static_cast<float>(transform.source_crop.y) + point.y * y_scale;
+    }
     mapped.x = clampFloat(mapped.x, 0.0F, static_cast<float>(std::max(0, transform.source_width - 1)));
     mapped.y = clampFloat(mapped.y, 0.0F, static_cast<float>(std::max(0, transform.source_height - 1)));
     return mapped;
@@ -77,14 +101,26 @@ Box mapBoxToOriginal(const Box& box, const PreprocessTransform& transform) {
         return box;
     }
 
-    const float x_scale = static_cast<float>(transform.source_crop.width) /
-                          static_cast<float>(transform.model_width);
-    const float y_scale = static_cast<float>(transform.source_crop.height) /
-                          static_cast<float>(transform.model_height);
-    const float x0 = static_cast<float>(transform.source_crop.x) + box.x * x_scale;
-    const float y0 = static_cast<float>(transform.source_crop.y) + box.y * y_scale;
-    const float x1 = static_cast<float>(transform.source_crop.x) + (box.x + box.w) * x_scale;
-    const float y1 = static_cast<float>(transform.source_crop.y) + (box.y + box.h) * y_scale;
+    float x0 = 0.0F;
+    float y0 = 0.0F;
+    float x1 = 0.0F;
+    float y1 = 0.0F;
+    if (transform.letterbox) {
+        const float scale = std::max(1.0e-6F, transform.scale);
+        x0 = static_cast<float>(transform.source_crop.x) + (box.x - transform.pad_x) / scale;
+        y0 = static_cast<float>(transform.source_crop.y) + (box.y - transform.pad_y) / scale;
+        x1 = static_cast<float>(transform.source_crop.x) + (box.x + box.w - transform.pad_x) / scale;
+        y1 = static_cast<float>(transform.source_crop.y) + (box.y + box.h - transform.pad_y) / scale;
+    } else {
+        const float x_scale = static_cast<float>(transform.source_crop.width) /
+                              static_cast<float>(transform.model_width);
+        const float y_scale = static_cast<float>(transform.source_crop.height) /
+                              static_cast<float>(transform.model_height);
+        x0 = static_cast<float>(transform.source_crop.x) + box.x * x_scale;
+        y0 = static_cast<float>(transform.source_crop.y) + box.y * y_scale;
+        x1 = static_cast<float>(transform.source_crop.x) + (box.x + box.w) * x_scale;
+        y1 = static_cast<float>(transform.source_crop.y) + (box.y + box.h) * y_scale;
+    }
 
     Box mapped = box;
     mapped.x = clampFloat(x0, 0.0F, static_cast<float>(std::max(0, transform.source_width - 1)));
@@ -516,7 +552,7 @@ void VisionApp::aiLoop() {
             }
 
             if (transform != nullptr) {
-                *transform = makeTransform(*frame, full_frame_crop, output);
+                *transform = makeTransform(*frame, full_frame_crop, output, config_.use_letterbox_preprocess);
             }
 
             return true;

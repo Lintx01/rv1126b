@@ -107,6 +107,7 @@ struct AppConfig {
     int cup_input_height{320};
     bool use_rga_preprocess{true};
     bool fallback_to_opencv{true};
+    bool use_letterbox_preprocess{false};
 
     bool enable_mpp_encoder{true};
     bool enable_mpp_decoder{false};
@@ -214,6 +215,10 @@ struct PreprocessTransform {
     CropRect source_crop;
     int model_width{0};
     int model_height{0};
+    bool letterbox{false};
+    float scale{1.0F};
+    float pad_x{0.0F};
+    float pad_y{0.0F};
     bool valid{false};
 };
 
