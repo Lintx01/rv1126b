@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace rv1126b {
@@ -120,12 +121,17 @@ public:
     void showFace(DisplayFace face);
     void showHeartExpression();
     void showSmileExpression();
+    bool flushLvglRgb565(int x0, int y0, int x1, int y1, const uint8_t* pixels, std::size_t length);
     void close();
 
 private:
     bool resetPanel();
     bool initPanel();
     bool drawRgb565Bitmap(const uint16_t* pixels, int width, int height);
+    bool setAddressWindow(int x0, int y0, int x1, int y1);
+    bool openLvgl();
+    void closeLvgl();
+    void lvglLoop();
     bool writeCommand(uint8_t command);
     bool writeData(const uint8_t* data, std::size_t length);
     bool setGpio(int gpio, bool high);
@@ -133,6 +139,8 @@ private:
     AppConfig config_;
     int spi_fd_{-1};
     bool opened_{false};
+    std::atomic<bool> lvgl_exit_requested_{false};
+    std::thread lvgl_thread_;
 };
 
 class MqttClient {

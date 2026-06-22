@@ -88,7 +88,7 @@ int main() {
 
     config.posture_drink_model_path = "/userdata/models/posture_drink.rknn";
     config.bad_posture_threshold = 0.60F;
-    config.cup_score_threshold = 0.25F;
+    config.cup_score_threshold = 0.50F;
     config.drink_distance_threshold = 120.0F;
     config.drink_distance_norm_threshold = 0.40F;
     config.drink_consecutive_hits = 3;
@@ -109,6 +109,9 @@ int main() {
      * 第一次点屏建议先用 8MHz 或 16MHz；确认稳定后再提高速度，不建议直接 40MHz。
      */
     config.enable_display = true;
+    config.enable_lvgl_display = true;
+    config.display_tick_ms = 5;
+    config.display_refresh_ms = 20;
     config.st7789_spi_device = "/dev/spidev1.0";
     config.st7789_spi_speed_hz = 8000000;
     config.st7789_width = 240;

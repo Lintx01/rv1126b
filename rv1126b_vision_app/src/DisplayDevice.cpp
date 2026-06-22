@@ -10,6 +10,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(RV1126B_HAS_LVGL)
+#include <lvgl.h>
+#endif
+
 #ifdef __linux__
 #include <fcntl.h>
 #include <linux/spi/spidev.h>
@@ -95,6 +99,45 @@ bool prepareGpio(int gpio) {
 }
 #endif
 
+#if defined(RV1126B_HAS_LVGL)
+DisplayDevice* g_lvgl_display_device = nullptr;
+
+#if LVGL_VERSION_MAJOR >= 9
+void lvglFlushCallback(lv_display_t* display, const lv_area_t* area, uint8_t* px_map) {
+    if (g_lvgl_display_device != nullptr && area != nullptr && px_map != nullptr) {
+        const int32_t width = area->x2 - area->x1 + 1;
+        const int32_t height = area->y2 - area->y1 + 1;
+        if (width > 0 && height > 0) {
+            const std::size_t bytes = static_cast<std::size_t>(width) *
+                                      static_cast<std::size_t>(height) * 2U;
+            (void)g_lvgl_display_device->flushLvglRgb565(
+                area->x1, area->y1, area->x2, area->y2, px_map, bytes);
+        }
+    }
+    lv_display_flush_ready(display);
+}
+#else
+void lvglFlushCallback(lv_disp_drv_t* display, const lv_area_t* area, lv_color_t* px_map) {
+    if (g_lvgl_display_device != nullptr && area != nullptr && px_map != nullptr) {
+        const int32_t width = area->x2 - area->x1 + 1;
+        const int32_t height = area->y2 - area->y1 + 1;
+        if (width > 0 && height > 0) {
+            const std::size_t bytes = static_cast<std::size_t>(width) *
+                                      static_cast<std::size_t>(height) * 2U;
+            (void)g_lvgl_display_device->flushLvglRgb565(
+                area->x1,
+                area->y1,
+                area->x2,
+                area->y2,
+                reinterpret_cast<const uint8_t*>(px_map),
+                bytes);
+        }
+    }
+    lv_disp_flush_ready(display);
+}
+#endif
+#endif
+
 }  // namespace
 
 bool DisplayDevice::open(const AppConfig& config) {
@@ -146,12 +189,27 @@ bool DisplayDevice::open(const AppConfig& config) {
         std::cout << "[Display] ST7789 open, spi=" << config.st7789_spi_device
                   << ", speed=" << config.st7789_spi_speed_hz
                   << ", size=" << config.st7789_width << "x" << config.st7789_height << "\n";
-        showHeartExpression();  //为了确认屏幕已经通，初始化加上显示逻辑
+        if (config_.enable_lvgl_display) {
+            if (!openLvgl()) {
+                close();
+                return false;
+            }
+        } else {
+            std::cout << "[Display] legacy ST7789 renderer enabled\n";
+            showHeartExpression();
+        }
+        return opened_;
     }
     return opened_;
 }
 
 void DisplayDevice::showFace(DisplayFace face) {
+    if (config_.enable_lvgl_display) {
+        std::cout << "[Display][LVGL] ignore legacy face="
+                  << static_cast<int>(face) << "\n";
+        return;
+    }
+
     if (!opened_) {
         std::cout << "[DisplayMock] face=" << toString(face) << "\n";
         return;
@@ -171,6 +229,10 @@ void DisplayDevice::showFace(DisplayFace face) {
 }
 
 void DisplayDevice::showHeartExpression() {
+    if (config_.enable_lvgl_display) {
+        std::cout << "[Display][LVGL] heart expression ignored by LVGL backend\n";
+        return;
+    }
     if (!config_.enable_display) {
         std::cout << "[Display] mock heart expression\n";
         return;
@@ -240,6 +302,10 @@ void DisplayDevice::showHeartExpression() {
 }
 
 void DisplayDevice::showSmileExpression() {
+    if (config_.enable_lvgl_display) {
+        std::cout << "[Display][LVGL] smile expression ignored by LVGL backend\n";
+        return;
+    }
     if (!config_.enable_display) {
         std::cout << "[Display] mock smile expression\n";
         return;
@@ -312,6 +378,8 @@ void DisplayDevice::showSmileExpression() {
 }
 
 void DisplayDevice::close() {
+    closeLvgl();
+
     if (opened_) {
         (void)setGpio(config_.st7789_gpio_backlight, false);
         std::cout << "[Display] close\n";
@@ -367,6 +435,51 @@ bool DisplayDevice::initPanel() {
     return true;
 }
 
+bool DisplayDevice::setAddressWindow(int x0, int y0, int x1, int y1) {
+    x0 = std::clamp(x0, 0, std::max(0, config_.st7789_width - 1));
+    y0 = std::clamp(y0, 0, std::max(0, config_.st7789_height - 1));
+    x1 = std::clamp(x1, 0, std::max(0, config_.st7789_width - 1));
+    y1 = std::clamp(y1, 0, std::max(0, config_.st7789_height - 1));
+    if (x1 < x0 || y1 < y0) {
+        return false;
+    }
+
+    const std::array<uint8_t, 4> col = {
+        static_cast<uint8_t>((x0 >> 8) & 0xFF), static_cast<uint8_t>(x0 & 0xFF),
+        static_cast<uint8_t>((x1 >> 8) & 0xFF), static_cast<uint8_t>(x1 & 0xFF)
+    };
+    const std::array<uint8_t, 4> row = {
+        static_cast<uint8_t>((y0 >> 8) & 0xFF), static_cast<uint8_t>(y0 & 0xFF),
+        static_cast<uint8_t>((y1 >> 8) & 0xFF), static_cast<uint8_t>(y1 & 0xFF)
+    };
+
+    return writeCommand(ST7789_CASET) && writeData(col.data(), col.size()) &&
+           writeCommand(ST7789_RASET) && writeData(row.data(), row.size()) &&
+           writeCommand(ST7789_RAMWR);
+}
+
+bool DisplayDevice::flushLvglRgb565(
+    int x0,
+    int y0,
+    int x1,
+    int y1,
+    const uint8_t* pixels,
+    std::size_t length) {
+    if (pixels == nullptr || length == 0) {
+        return false;
+    }
+    if (!setAddressWindow(x0, y0, x1, y1)) {
+        return false;
+    }
+
+    std::vector<uint8_t> big_endian(length);
+    for (std::size_t i = 0; i + 1U < length; i += 2U) {
+        big_endian[i] = pixels[i + 1U];
+        big_endian[i + 1U] = pixels[i];
+    }
+    return writeData(big_endian.data(), big_endian.size());
+}
+
 bool DisplayDevice::drawRgb565Bitmap(const uint16_t* pixels, int width, int height) {
     if (pixels == nullptr || width <= 0 || height <= 0) {
         return false;
@@ -379,18 +492,7 @@ bool DisplayDevice::drawRgb565Bitmap(const uint16_t* pixels, int width, int heig
     const int x1 = x0 + draw_width - 1;
     const int y1 = y0 + draw_height - 1;
 
-    const std::array<uint8_t, 4> col = {
-        static_cast<uint8_t>((x0 >> 8) & 0xFF), static_cast<uint8_t>(x0 & 0xFF),
-        static_cast<uint8_t>((x1 >> 8) & 0xFF), static_cast<uint8_t>(x1 & 0xFF)
-    };
-    const std::array<uint8_t, 4> row = {
-        static_cast<uint8_t>((y0 >> 8) & 0xFF), static_cast<uint8_t>(y0 & 0xFF),
-        static_cast<uint8_t>((y1 >> 8) & 0xFF), static_cast<uint8_t>(y1 & 0xFF)
-    };
-
-    if (!writeCommand(ST7789_CASET) || !writeData(col.data(), col.size()) ||
-        !writeCommand(ST7789_RASET) || !writeData(row.data(), row.size()) ||
-        !writeCommand(ST7789_RAMWR)) {
+    if (!setAddressWindow(x0, y0, x1, y1)) {
         return false;
     }
 
@@ -408,6 +510,90 @@ bool DisplayDevice::drawRgb565Bitmap(const uint16_t* pixels, int width, int heig
     }
 
     return true;
+}
+
+bool DisplayDevice::openLvgl() {
+#if defined(RV1126B_HAS_LVGL)
+    lv_init();
+    g_lvgl_display_device = this;
+
+    const int width = config_.st7789_width > 0 ? config_.st7789_width : 240;
+    const int height = config_.st7789_height > 0 ? config_.st7789_height : 240;
+    const std::size_t draw_pixels = static_cast<std::size_t>(width) * 40U;
+    auto* draw_buffer = new lv_color_t[draw_pixels];
+
+#if LVGL_VERSION_MAJOR >= 9
+    lv_display_t* display = lv_display_create(width, height);
+    lv_display_set_flush_cb(display, lvglFlushCallback);
+    lv_display_set_buffers(
+        display,
+        draw_buffer,
+        nullptr,
+        draw_pixels * sizeof(lv_color_t),
+        LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+    lv_obj_t* screen = lv_screen_active();
+#else
+    auto* draw_buf = new lv_disp_draw_buf_t;
+    lv_disp_draw_buf_init(draw_buf, draw_buffer, nullptr, static_cast<uint32_t>(draw_pixels));
+
+    auto* display_driver = new lv_disp_drv_t;
+    lv_disp_drv_init(display_driver);
+    display_driver->hor_res = width;
+    display_driver->ver_res = height;
+    display_driver->flush_cb = lvglFlushCallback;
+    display_driver->draw_buf = draw_buf;
+    (void)lv_disp_drv_register(display_driver);
+
+    lv_obj_t* screen = lv_scr_act();
+#endif
+    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
+    lv_obj_t* label = lv_label_create(screen);
+    lv_label_set_text(label, "LVGL OK");
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_center(label);
+    (void)lv_timer_handler();
+
+    lvgl_exit_requested_ = false;
+    lvgl_thread_ = std::thread(&DisplayDevice::lvglLoop, this);
+
+    std::cout << "[Display][LVGL] enabled\n";
+    std::cout << "[Display][LVGL] resolution=" << width << "x" << height << "\n";
+    return true;
+#else
+    std::cerr << "[Display][LVGL] disabled: built without LVGL\n";
+    return false;
+#endif
+}
+
+void DisplayDevice::closeLvgl() {
+    lvgl_exit_requested_ = true;
+    if (lvgl_thread_.joinable()) {
+        lvgl_thread_.join();
+    }
+#if defined(RV1126B_HAS_LVGL)
+    if (g_lvgl_display_device == this) {
+        g_lvgl_display_device = nullptr;
+    }
+#endif
+}
+
+void DisplayDevice::lvglLoop() {
+#if defined(RV1126B_HAS_LVGL)
+    const int tick_ms = std::max(1, config_.display_tick_ms);
+    const int refresh_ms = std::max(tick_ms, config_.display_refresh_ms);
+    int elapsed_ms = 0;
+
+    while (!lvgl_exit_requested_) {
+        sleepMs(tick_ms);
+        lv_tick_inc(static_cast<uint32_t>(tick_ms));
+        elapsed_ms += tick_ms;
+        if (elapsed_ms >= refresh_ms) {
+            (void)lv_timer_handler();
+            elapsed_ms = 0;
+        }
+    }
+#endif
 }
 
 bool DisplayDevice::writeCommand(uint8_t command) {
