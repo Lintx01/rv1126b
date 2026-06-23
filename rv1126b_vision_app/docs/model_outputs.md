@@ -65,7 +65,7 @@
 - 代码入口：`CupModel::parseOutput()`
 - 输入 tensor：`images`，形状 `[1, 3, 640, 640]`
 - RKNN 内置预处理：RGB，除以 255，`mean=[0, 0, 0]`，`std=[255, 255, 255]`
-- 目标类别：COCO `class_id=41`，含义为 `cup`
+- 目标类别：COCO 饮水容器相关类别，`39=bottle`、`40=wine glass`、`41=cup`、`45=bowl`
 - 输出数量：9
 
 输出 tensor：
@@ -94,17 +94,17 @@
   - box tensor：`64 = 4 * 16`，表示 left/top/right/bottom 四个方向的 DFL 距离分布。
   - class tensor：80 个 COCO 类别分数。
   - objectness tensor：每个 grid cell 一个目标置信度。
-- 水杯最终置信度计算方式：
+- 饮水容器最终置信度计算方式：
 
 ```text
-cup_score = class_score[class_id=41] * objectness_score
+container_score = max(class_score[class_id in 39,40,41,45]) * objectness_score
 ```
 
 后处理流程：
 
 - 按相同 grid 尺寸匹配 box、class、objectness 三个 tensor。
 - 对 box tensor 做 DFL 解码，得到检测框。
-- 只保留 `class_id=41` 的 cup 分数。
+- 只保留 `39/40/41/45` 四类饮水容器分数，并取其中最高类别作为检测框标签。
 - 使用 `cup_score_threshold` 过滤低分候选。
 - 执行 NMS，输出最终水杯框。
 
@@ -131,6 +131,6 @@ cup_postprocessed_boxes
 
 合理现象：
 
-- 画面里没有水杯：应接近 `candidates=0,kept_after_nms=0`，结果无有效水杯框。
-- 画面里有一个清晰水杯：通常只有少量候选框，NMS 后一般保留 1 个主框。
-- 如果 NMS 后仍然有几百个框，通常说明输出布局或分数解释错了，而不是画面里真的有这么多水杯。
+- 画面里没有饮水容器：应接近 `candidates=0,kept_after_nms=0`，结果无有效水杯框。
+- 画面里有一个清晰水杯、水瓶、玻璃杯或碗：通常只有少量候选框，NMS 后一般保留 1 个主框。
+- 如果 NMS 后仍然有几百个框，通常说明输出布局或分数解释错了，而不是画面里真的有这么多饮水容器。

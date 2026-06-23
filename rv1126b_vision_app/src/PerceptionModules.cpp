@@ -30,7 +30,7 @@ constexpr std::size_t kYoloPoseKeypointChannels = kPoseKeypointCount * 3;
 constexpr std::size_t kYoloDetectClassCount = 80;
 constexpr std::size_t kYoloDetectRawChannels = kYoloPoseBoxChannels + kYoloDetectClassCount;
 constexpr std::size_t kYoloDetectDecodedStride = 4 + kYoloDetectClassCount;
-constexpr int kCupClassId = 41;
+constexpr std::array<int, 4> kDrinkContainerClassIds{39, 40, 41, 45};
 constexpr float kPoseScoreThreshold = 0.25F;
 constexpr float kPoseNmsThreshold = 0.45F;
 constexpr float kCupNmsThreshold = 0.45F;
@@ -231,6 +231,62 @@ float normalizeYoloScore(float value) {
     return sigmoid(value);
 }
 
+bool isDrinkContainerClassId(int class_id) {
+    return std::find(kDrinkContainerClassIds.begin(), kDrinkContainerClassIds.end(), class_id) !=
+           kDrinkContainerClassIds.end();
+}
+
+const char* drinkContainerLabel(int class_id) {
+    switch (class_id) {
+        case 39:
+            return "bottle";
+        case 40:
+            return "wine_glass";
+        case 41:
+            return "cup";
+        case 45:
+            return "bowl";
+        default:
+            return "container";
+    }
+}
+
+std::string drinkContainerClassIdsText() {
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < kDrinkContainerClassIds.size(); ++i) {
+        if (i != 0) {
+            oss << "|";
+        }
+        oss << kDrinkContainerClassIds[i];
+    }
+    return oss.str();
+}
+
+bool bestDrinkContainerScore(
+    const std::vector<float>& values,
+    std::size_t class_base,
+    std::size_t step,
+    float& best_score,
+    int& best_class_id) {
+    best_score = -1.0F;
+    best_class_id = -1;
+
+    for (const int class_id : kDrinkContainerClassIds) {
+        const std::size_t index = class_base + static_cast<std::size_t>(class_id) * step;
+        if (index >= values.size()) {
+            continue;
+        }
+
+        const float score = normalizeYoloScore(values[index]);
+        if (score > best_score) {
+            best_score = score;
+            best_class_id = class_id;
+        }
+    }
+
+    return best_class_id >= 0;
+}
+
 void appendDecodedPoseCandidate(
     const std::vector<float>& values,
     std::size_t base,
@@ -273,6 +329,7 @@ void appendDecodedPoseCandidate(
 void appendCupDetection(
     const Box& box,
     float score,
+    int class_id,
     std::vector<DetectionCandidate>& candidates) {
     if (score < 0.0F) {
         return;
@@ -280,9 +337,9 @@ void appendCupDetection(
 
     DetectionCandidate candidate;
     candidate.box = box;
-    candidate.box.label = "cup";
+    candidate.box.label = drinkContainerLabel(class_id);
     candidate.box.score = score;
-    candidate.class_id = kCupClassId;
+    candidate.class_id = class_id;
     candidate.score = score;
     candidates.push_back(candidate);
 }
@@ -299,8 +356,10 @@ void appendDecodedYoloDetectionCandidate(
         return;
     }
 
-    const float cup_score = normalizeYoloScore(values[base + (4 + kCupClassId) * step]);
-    if (cup_score < score_threshold) {
+    float container_score = -1.0F;
+    int class_id = -1;
+    if (!bestDrinkContainerScore(values, base + 4 * step, step, container_score, class_id) ||
+        container_score < score_threshold) {
         return;
     }
 
@@ -312,7 +371,8 @@ void appendDecodedYoloDetectionCandidate(
             values[base + 3 * step],
             frame_width,
             frame_height),
-        cup_score,
+        container_score,
+        class_id,
         candidates);
 }
 
@@ -345,9 +405,15 @@ bool decodeYoloDetectionRawOutputs(
         for (std::size_t y = 0; y < grid_h; ++y) {
             for (std::size_t x = 0; x < grid_w; ++x) {
                 const std::size_t cell_index = y * grid_w + x;
-                const float cup_score =
-                    normalizeYoloScore(values[(kYoloPoseBoxChannels + kCupClassId) * grid_size + cell_index]);
-                if (cup_score < score_threshold) {
+                float container_score = -1.0F;
+                int class_id = -1;
+                if (!bestDrinkContainerScore(
+                        values,
+                        kYoloPoseBoxChannels * grid_size + cell_index,
+                        grid_size,
+                        container_score,
+                        class_id) ||
+                    container_score < score_threshold) {
                     continue;
                 }
 
@@ -373,7 +439,8 @@ bool decodeYoloDetectionRawOutputs(
 
                 appendCupDetection(
                     makeBoxFromValues(x1, y1, x2, y2, frame.width, frame.height),
-                    cup_score,
+                    container_score,
+                    class_id,
                     candidates);
             }
         }
@@ -453,11 +520,19 @@ bool decodeYoloDetectionSplitOutputs(
         for (std::size_t y = 0; y < grid_h; ++y) {
             for (std::size_t x = 0; x < grid_w; ++x) {
                 const std::size_t cell_index = y * grid_w + x;
-                const float class_score =
-                    normalizeYoloScore(class_values[kCupClassId * grid_size + cell_index]);
+                float class_score = -1.0F;
+                int class_id = -1;
+                if (!bestDrinkContainerScore(
+                        class_values,
+                        cell_index,
+                        grid_size,
+                        class_score,
+                        class_id)) {
+                    continue;
+                }
                 const float object_score = normalizeYoloScore(object_values[cell_index]);
-                const float cup_score = class_score * object_score;
-                if (cup_score < score_threshold) {
+                const float container_score = class_score * object_score;
+                if (container_score < score_threshold) {
                     continue;
                 }
 
@@ -483,7 +558,8 @@ bool decodeYoloDetectionSplitOutputs(
 
                 appendCupDetection(
                     makeBoxFromValues(x1, y1, x2, y2, frame.width, frame.height),
-                    cup_score,
+                    container_score,
+                    class_id,
                     candidates);
             }
         }
@@ -572,10 +648,12 @@ bool decodePostprocessedCupOutput(
 
             if (stride == 6) {
                 const int class_id = static_cast<int>(std::lround(values[offset + 5]));
-                if (class_id != kCupClassId) {
+                if (!isDrinkContainerClassId(class_id)) {
                     continue;
                 }
             }
+
+            const int class_id = stride == 6 ? static_cast<int>(std::lround(values[offset + 5])) : 41;
 
             appendCupDetection(
                 makeBoxFromValues(
@@ -586,6 +664,7 @@ bool decodePostprocessedCupOutput(
                     frame.width,
                     frame.height),
                 score,
+                class_id,
                 candidates);
         }
     }
@@ -982,7 +1061,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
     std::vector<DetectionCandidate> candidates;
     std::string parser_name;
 
-    // 水杯模型按 COCO 类别表接入，class_id=41 只保留 cup，避免其他 YOLO 检测框参与喝水距离判断。
+    // 水容器按 COCO 类别表接入：bottle/wine glass/cup/bowl，用于喝水距离判断。
     if (decodeYoloDetectionRawOutputs(outputs, model_.outputInfos(), frame, config_.cup_score_threshold, candidates)) {
         parser_name = "cup_yolov8_raw_decoder";
     }
@@ -1022,7 +1101,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
 
             std::ostringstream oss;
             oss << parser_name
-                << ",class_id=" << kCupClassId
+                << ",class_ids=" << drinkContainerClassIdsText()
                 << ",candidates=" << candidate_count
                 << ",kept_after_nms=" << result.cups.size()
                 << ",best_score=" << result.cup_box.score;
@@ -1032,7 +1111,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
 
         std::ostringstream oss;
         oss << parser_name
-            << ",class_id=" << kCupClassId
+            << ",class_ids=" << drinkContainerClassIdsText()
             << ",candidates=0,kept_after_nms=0";
         result.message = oss.str();
         return result;
@@ -1040,7 +1119,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
 
     std::size_t parsed_boxes = 0;
     for (const auto& values : outputs) {
-        // 保守接入扁平水杯检测输出，每个候选框 5 个 float：
+        // 保守接入无类别字段的扁平检测输出，每个候选框 5 个 float：
         // x、y、w/x2、h/y2、score。低于阈值的框直接丢弃。
         if (values.size() < 5) {
             continue;
@@ -1062,7 +1141,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
                 frame.width,
                 frame.height);
             cup.score = score;
-            cup.label = "cup";
+            cup.label = "container";
             result.cups.push_back(cup);
             ++parsed_boxes;
         }
