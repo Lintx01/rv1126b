@@ -47,8 +47,6 @@ private:
     bool cropResizeByRga(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst);
     bool cropResizeByOpenCv(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst);
     bool cropResizeBySoftware(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst);
-    bool cropResizeLetterboxByOpenCv(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst);
-    bool cropResizeLetterboxBySoftware(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst);
     static CropRect normalizeCrop(const Frame& src, const CropRect& crop);
 
     AppConfig config_;

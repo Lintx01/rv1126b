@@ -2,24 +2,19 @@
 
 #include "FramePool.hpp"
 
-#include <chrono>
 #include <algorithm>
-#include <array>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
-#include <cmath>
+#include <ctime>
+#include <iomanip>
 #include <exception>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <utility>
-#include <cstring>
-
-#if defined(RV1126B_HAS_OPENCV)
-#include <opencv2/core.hpp>
-#include <opencv2/imgproc.hpp>
-#endif
+#include <vector>
 
 namespace rv1126b {
 
@@ -31,148 +26,182 @@ void handleExitSignal(int) {
     g_signal_exit_requested = true;
 }
 
-float clampFloat(float value, float low, float high) {
-    return std::max(low, std::min(value, high));
+uint64_t elapsedUs(const std::chrono::steady_clock::time_point& begin) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - begin)
+            .count());
 }
 
-PreprocessTransform makeTransform(
-    const Frame& source,
-    const CropRect& crop,
-    const Frame& model_input,
-    bool letterbox) {
-    PreprocessTransform transform;
-    transform.source_width = source.width;
-    transform.source_height = source.height;
-    transform.letterbox = letterbox;
-    transform.source_crop = crop;
-    if (transform.source_crop.width <= 0 || transform.source_crop.height <= 0) {
-        transform.source_crop = CropRect{0, 0, source.width, source.height};
-    }
-    transform.source_crop.x = std::clamp(transform.source_crop.x, 0, std::max(0, source.width - 1));
-    transform.source_crop.y = std::clamp(transform.source_crop.y, 0, std::max(0, source.height - 1));
-    transform.source_crop.width = std::clamp(transform.source_crop.width, 1, source.width - transform.source_crop.x);
-    transform.source_crop.height = std::clamp(transform.source_crop.height, 1, source.height - transform.source_crop.y);
-    transform.model_width = model_input.width;
-    transform.model_height = model_input.height;
-    if (letterbox && model_input.width > 0 && model_input.height > 0) {
-        transform.scale = std::min(
-            static_cast<float>(model_input.width) / static_cast<float>(std::max(1, transform.source_crop.width)),
-            static_cast<float>(model_input.height) / static_cast<float>(std::max(1, transform.source_crop.height)));
-        const int resized_width = std::min(
-            model_input.width,
-            std::max(1, static_cast<int>(std::round(static_cast<float>(transform.source_crop.width) * transform.scale))));
-        const int resized_height = std::min(
-            model_input.height,
-            std::max(1, static_cast<int>(std::round(static_cast<float>(transform.source_crop.height) * transform.scale))));
-        transform.pad_x = static_cast<float>((model_input.width - resized_width) / 2);
-        transform.pad_y = static_cast<float>((model_input.height - resized_height) / 2);
-    }
-    transform.valid = source.width > 0 && source.height > 0 &&
-                      crop.width > 0 && crop.height > 0 &&
-                      model_input.width > 0 && model_input.height > 0;
-    return transform;
+int64_t steadyMs() {
+    return static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
 }
 
-Point mapPointToOriginal(const Point& point, const PreprocessTransform& transform) {
-    if (!transform.valid) {
-        return point;
-    }
+struct MqttRuntimeState {
+    std::mutex mutex;
+    AppState latest_app_state{};
+    bool has_app_state{false};
+    int64_t last_status_publish_ms{0};
+    int64_t last_telemetry_publish_ms{0};
+    int64_t last_bad_posture_event_ms{0};
+    int64_t last_drink_remind_event_ms{0};
+};
 
-    Point mapped;
-    if (transform.letterbox) {
-        const float scale = std::max(1.0e-6F, transform.scale);
-        mapped.x = static_cast<float>(transform.source_crop.x) + (point.x - transform.pad_x) / scale;
-        mapped.y = static_cast<float>(transform.source_crop.y) + (point.y - transform.pad_y) / scale;
+MqttRuntimeState g_mqtt_runtime_state;
+
+void resetMqttRuntimeState() {
+    std::lock_guard<std::mutex> lock(g_mqtt_runtime_state.mutex);
+    g_mqtt_runtime_state.latest_app_state = AppState{};
+    g_mqtt_runtime_state.latest_app_state.device_mode = DeviceMode::STANDBY;
+    g_mqtt_runtime_state.latest_app_state.posture_state = PostureState::UNKNOWN;
+    g_mqtt_runtime_state.latest_app_state.drink_state = DrinkState::NORMAL;
+    g_mqtt_runtime_state.has_app_state = true;
+    g_mqtt_runtime_state.last_status_publish_ms = 0;
+    g_mqtt_runtime_state.last_telemetry_publish_ms = 0;
+    g_mqtt_runtime_state.last_bad_posture_event_ms = 0;
+    g_mqtt_runtime_state.last_drink_remind_event_ms = 0;
+}
+
+void updateLatestMqttAppState(const AppState& state) {
+    std::lock_guard<std::mutex> lock(g_mqtt_runtime_state.mutex);
+    g_mqtt_runtime_state.latest_app_state = state;
+    g_mqtt_runtime_state.has_app_state = true;
+}
+
+std::string mqttTopic(const AppConfig& config, const char* leaf) {
+    return config.mqtt_base_topic + "/" + leaf;
+}
+
+const char* mqttStateString(const AppState& state) {
+    if (state.display_face == DisplayFace::ERROR_FACE) {
+        return "error";
+    }
+    return state.device_mode == DeviceMode::STANDBY ? "idle" : "running";
+}
+
+int64_t unixTimestampSeconds() {
+    return static_cast<int64_t>(std::time(nullptr));
+}
+
+std::string buildStatusPayload(const AppState& state) {
+    const std::string gesture = state.gesture_triggered && !state.gesture_name.empty()
+                                    ? state.gesture_name
+                                    : "none";
+    std::ostringstream oss;
+    oss << "{"
+        << "\"device\":\"rv1126b\","
+        << "\"state\":\"" << mqttStateString(state) << "\","
+        << "\"posture\":\"" << toString(state.posture_state) << "\","
+        << "\"drink\":\"" << toString(state.drink_state) << "\","
+        << "\"gesture\":\"" << jsonEscape(gesture) << "\","
+        << "\"timestamp\":" << unixTimestampSeconds()
+        << "}";
+    return oss.str();
+}
+
+std::string buildEventPayload(const std::string& event_name, const std::string& message) {
+    std::ostringstream oss;
+    oss << "{"
+        << "\"event\":\"" << jsonEscape(event_name) << "\","
+        << "\"message\":\"" << jsonEscape(message) << "\","
+        << "\"timestamp\":" << unixTimestampSeconds()
+        << "}";
+    return oss.str();
+}
+
+std::string buildTelemetryPayload(const AppConfig& config) {
+    std::ostringstream oss;
+    oss << "{"
+        << "\"fps\":0,"
+        << "\"ai_fps\":0,"
+        << "\"encoder\":\"" << (config.enable_mpp_encoder ? "mpp_h264" : "disabled") << "\","
+        << "\"stream\":\"rtsp\","
+        << "\"http_flv_port\":" << config.web_server_port << ","
+        << "\"rtsp_port\":8554"
+        << "}";
+    return oss.str();
+}
+
+bool shouldPublishCooldownEvent(const AppConfig& config, const std::string& event_name) {
+    const int64_t now_ms = steadyMs();
+    const int64_t cooldown_ms = std::max<int64_t>(0, config.mqtt_event_cooldown_ms);
+    std::lock_guard<std::mutex> lock(g_mqtt_runtime_state.mutex);
+
+    int64_t* last_publish_ms = nullptr;
+    if (event_name == "bad_posture") {
+        last_publish_ms = &g_mqtt_runtime_state.last_bad_posture_event_ms;
+    } else if (event_name == "drink_remind") {
+        last_publish_ms = &g_mqtt_runtime_state.last_drink_remind_event_ms;
     } else {
-        const float x_scale = static_cast<float>(transform.source_crop.width) /
-                              static_cast<float>(transform.model_width);
-        const float y_scale = static_cast<float>(transform.source_crop.height) /
-                              static_cast<float>(transform.model_height);
-        mapped.x = static_cast<float>(transform.source_crop.x) + point.x * x_scale;
-        mapped.y = static_cast<float>(transform.source_crop.y) + point.y * y_scale;
+        return true;
     }
-    mapped.x = clampFloat(mapped.x, 0.0F, static_cast<float>(std::max(0, transform.source_width - 1)));
-    mapped.y = clampFloat(mapped.y, 0.0F, static_cast<float>(std::max(0, transform.source_height - 1)));
-    return mapped;
+
+    if (cooldown_ms > 0 && *last_publish_ms != 0 && (now_ms - *last_publish_ms) < cooldown_ms) {
+        return false;
+    }
+
+    *last_publish_ms = now_ms;
+    return true;
 }
 
-Box mapBoxToOriginal(const Box& box, const PreprocessTransform& transform) {
-    if (!transform.valid) {
-        return box;
-    }
-
-    float x0 = 0.0F;
-    float y0 = 0.0F;
-    float x1 = 0.0F;
-    float y1 = 0.0F;
-    if (transform.letterbox) {
-        const float scale = std::max(1.0e-6F, transform.scale);
-        x0 = static_cast<float>(transform.source_crop.x) + (box.x - transform.pad_x) / scale;
-        y0 = static_cast<float>(transform.source_crop.y) + (box.y - transform.pad_y) / scale;
-        x1 = static_cast<float>(transform.source_crop.x) + (box.x + box.w - transform.pad_x) / scale;
-        y1 = static_cast<float>(transform.source_crop.y) + (box.y + box.h - transform.pad_y) / scale;
-    } else {
-        const float x_scale = static_cast<float>(transform.source_crop.width) /
-                              static_cast<float>(transform.model_width);
-        const float y_scale = static_cast<float>(transform.source_crop.height) /
-                              static_cast<float>(transform.model_height);
-        x0 = static_cast<float>(transform.source_crop.x) + box.x * x_scale;
-        y0 = static_cast<float>(transform.source_crop.y) + box.y * y_scale;
-        x1 = static_cast<float>(transform.source_crop.x) + (box.x + box.w) * x_scale;
-        y1 = static_cast<float>(transform.source_crop.y) + (box.y + box.h) * y_scale;
-    }
-
-    Box mapped = box;
-    mapped.x = clampFloat(x0, 0.0F, static_cast<float>(std::max(0, transform.source_width - 1)));
-    mapped.y = clampFloat(y0, 0.0F, static_cast<float>(std::max(0, transform.source_height - 1)));
-    const float right = clampFloat(x1, 0.0F, static_cast<float>(std::max(0, transform.source_width)));
-    const float bottom = clampFloat(y1, 0.0F, static_cast<float>(std::max(0, transform.source_height)));
-    mapped.w = std::max(1.0F, right - mapped.x);
-    mapped.h = std::max(1.0F, bottom - mapped.y);
-    return mapped;
-}
-
-void mapPoseToOriginal(PoseResult& pose, const PreprocessTransform& transform) {
-    if (!transform.valid || !pose.valid) {
+void collectPeriodicMqttMessages(const AppConfig& config, std::vector<MqttMessage>& messages) {
+    const int64_t now_ms = steadyMs();
+    std::lock_guard<std::mutex> lock(g_mqtt_runtime_state.mutex);
+    if (!g_mqtt_runtime_state.has_app_state) {
         return;
     }
 
-    if (pose.has_person) {
-        pose.person_box = mapBoxToOriginal(pose.person_box, transform);
+    const int64_t status_interval_ms = std::max<int64_t>(200, config.mqtt_status_interval_ms);
+    if (g_mqtt_runtime_state.last_status_publish_ms == 0 ||
+        (now_ms - g_mqtt_runtime_state.last_status_publish_ms) >= status_interval_ms) {
+        messages.push_back(MqttMessage{
+            mqttTopic(config, "status"),
+            buildStatusPayload(g_mqtt_runtime_state.latest_app_state),
+            0,
+            false
+        });
+        g_mqtt_runtime_state.last_status_publish_ms = now_ms;
     }
-    for (PoseKeypoint& keypoint : pose.keypoints) {
-        const Point mapped = mapPointToOriginal(Point{keypoint.x, keypoint.y}, transform);
-        keypoint.x = mapped.x;
-        keypoint.y = mapped.y;
-    }
-    if (pose.has_person) {
-        pose.message += ",coords=original";
+
+    const int64_t telemetry_interval_ms = std::max<int64_t>(200, config.mqtt_telemetry_interval_ms);
+    if (g_mqtt_runtime_state.last_telemetry_publish_ms == 0 ||
+        (now_ms - g_mqtt_runtime_state.last_telemetry_publish_ms) >= telemetry_interval_ms) {
+        messages.push_back(MqttMessage{
+            mqttTopic(config, "telemetry"),
+            buildTelemetryPayload(config),
+            0,
+            false
+        });
+        g_mqtt_runtime_state.last_telemetry_publish_ms = now_ms;
     }
 }
 
-// 6.19加
-void mapCupToOriginal(CupResult& cup, const PreprocessTransform& transform) {
-    if (!transform.valid || !cup.valid) {
+void queueMqttEvent(
+    const AppConfig& config,
+    BlockingQueue<MqttMessage>& mqtt_queue,
+    const std::string& event_name,
+    const std::string& message,
+    bool use_cooldown) {
+    if (!config.enable_mqtt) {
+        return;
+    }
+    if (use_cooldown && !shouldPublishCooldownEvent(config, event_name)) {
         return;
     }
 
-    cup.cup_box = mapBoxToOriginal(cup.cup_box, transform);
-    for (Box& box : cup.cups) {
-        box = mapBoxToOriginal(box, transform);
+    const MqttMessage mqtt_message{
+        mqttTopic(config, "event"),
+        buildEventPayload(event_name, message),
+        0,
+        false
+    };
+    if (!mqtt_queue.push(mqtt_message)) {
+        std::cerr << "[MQTT] warning: queue rejected event=" << event_name << "\n";
     }
-    cup.message += ",coords=original";
 }
-
-uint8_t clampToByte(int value) {
-    if (value < 0) {
-        return 0;
-    }
-    if (value > 255) {
-        return 255;
-    }
-    return static_cast<uint8_t>(value);
-}
-
 
 }  // namespace
 
@@ -184,17 +213,25 @@ VisionApp::~VisionApp() {
 
 bool VisionApp::start() {
     try {
-        const bool camera_uses_nv12 = !config_.input_stream_is_h264 && config_.frame_channels == 1;
-        const std::size_t frame_pixels = static_cast<std::size_t>(config_.frame_width) *
-                                         static_cast<std::size_t>(config_.frame_height);
-        const std::size_t frame_bytes = camera_uses_nv12
-                                            ? frame_pixels * 3U / 2U
-                                            : frame_pixels *
-                                                  static_cast<std::size_t>(config_.frame_channels);
+        const bool use_nv12_pool_bytes =
+            (config_.frame_channels == 1) && !config_.input_stream_is_h264;
+        const std::size_t frame_bytes = use_nv12_pool_bytes
+                                            ? (static_cast<std::size_t>(config_.frame_width) *
+                                               static_cast<std::size_t>(config_.frame_height) * 3U / 2U)
+                                            : (static_cast<std::size_t>(config_.frame_width) *
+                                               static_cast<std::size_t>(config_.frame_height) *
+                                               static_cast<std::size_t>(config_.frame_channels));
 
+        const char* frame_pool_format = "UNKNOWN";
+        if (use_nv12_pool_bytes) {
+            frame_pool_format = "NV12";
+        } else if (config_.frame_channels == 3) {
+            frame_pool_format = "RGB";
+        } else if (config_.frame_channels == 1) {
+            frame_pool_format = "GRAY";
+        }
         std::cout << "[FramePool] frame_bytes=" << frame_bytes
-                  << ", format=" << (camera_uses_nv12 ? "NV12" : "configured")
-                  << "\n";
+                  << ", format=" << frame_pool_format << "\n";
 
         FramePool::instance().initialize(
             8,
@@ -247,18 +284,6 @@ bool VisionApp::start() {
             throw std::runtime_error("image processor open failed");
         }
 
-#if defined(RV1126B_HAS_OPENCV)
-        overlay_runtime_enabled_ = config_.enable_video_overlay;
-        std::cout << "[Overlay] " << (overlay_runtime_enabled_ ? "enabled" : "disabled") << "\n";
-#else
-        overlay_runtime_enabled_ = false;
-        if (config_.enable_video_overlay) {
-            std::cout << "[Overlay] disabled because OpenCV is not available\n";
-        } else {
-            std::cout << "[Overlay] disabled\n";
-        }
-#endif
-
         if (config_.enable_display) {
             if (!display_.open(config_)) {
                 std::cerr << "[App] warning: display open failed, display output will use mock log\n";
@@ -269,7 +294,8 @@ bool VisionApp::start() {
 
         if (config_.enable_mqtt) {
             if (!mqtt_.connect(config_)) {
-                std::cerr << "[App] warning: mqtt connect failed, mqtt publish disabled\n";
+                std::cerr << "[MQTT][WARN] connect failed, continue without MQTT\n";
+                config_.enable_mqtt = false;
             }
         } else {
             std::cout << "[App] MQTT disabled by config\n";
@@ -285,12 +311,7 @@ bool VisionApp::start() {
 
         if (config_.enable_mpp_encoder) {
             if (!mpp_encoder_.open(config_)) {
-                std::cerr << "[App] warning: mpp encoder open failed";
-                if (config_.web_stream_protocol == WebStreamProtocol::HttpFlv) {
-                    std::cerr << ", HTTP-FLV requires real H264 encoder\n";
-                } else {
-                    std::cerr << ", encoderLoop will use raw-frame fallback\n";
-                }
+                std::cerr << "[App] warning: mpp encoder open failed, encoderLoop will use raw-frame fallback\n";
             }
         } else {
             std::cout << "[App] MPP encoder disabled by config\n";
@@ -308,6 +329,7 @@ bool VisionApp::start() {
         thread_error_ = false;
         state_ = SystemState::Idle;
         g_signal_exit_requested = false;
+        resetMqttRuntimeState();
 
         camera_thread_ = std::thread(&VisionApp::runThread, this, "camera", [this] { cameraLoop(); });
         if (shouldRunEncoderPipeline()) {
@@ -379,6 +401,7 @@ int VisionApp::run() {
     }
 
     while (!exit_requested_.load() && !g_signal_exit_requested.load()) {
+        logPerformanceIfDue();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
@@ -436,6 +459,8 @@ void VisionApp::cameraLoop() {
             std::cout << "[Camera] frame_id=" << frame->id << "\n";
         }
 
+        perf_.camera_frames.fetch_add(1, std::memory_order_relaxed);
+
         if (!latest_ai_frame_.update(frame)) {
             break;
         }
@@ -464,22 +489,15 @@ void VisionApp::encoderLoop() {
             std::cout << "\n";
         }
         last_encoded_frame_id = frame_id;
-
-        Frame overlay_frame;
-        const Frame* encode_frame = item->get();
-        if (applyVideoOverlay(**item, overlay_frame)) {
-            encode_frame = &overlay_frame;
-        }
+        perf_.encoder_frames.fetch_add(1, std::memory_order_relaxed);
 
         EncodedPacket packet;
-        if (mpp_encoder_.encode(*encode_frame, packet)) {
+        const auto encode_begin = std::chrono::steady_clock::now();
+        if (mpp_encoder_.encode(**item, packet)) {
+            perf_.mpp_encode.addSample(elapsedUs(encode_begin));
             web_.publishEncodedVideo(packet);
-        } else if (config_.web_stream_protocol == WebStreamProtocol::HttpFlv) {
-            if ((frame_id % 30U) == 0U) {
-                std::cerr << "[Encoder] H264 encode failed, HTTP-FLV frame dropped, frame_id="
-                          << frame_id << "\n";
-            }
         } else {
+            perf_.mpp_encode.addSample(elapsedUs(encode_begin));
             web_.publishFrame(*item);
         }
     }
@@ -492,17 +510,6 @@ void VisionApp::aiLoop() {
     bool has_cup_result = false;
     uint64_t last_ai_buffer_version = 0;
     uint64_t last_ai_frame_id = 0;
-
-    const char* force_ai_env = std::getenv("RV_FORCE_AI_RUNNING");
-    const bool force_ai_running =
-        force_ai_env != nullptr &&
-        (std::strcmp(force_ai_env, "1") == 0 ||
-         std::strcmp(force_ai_env, "true") == 0 ||
-         std::strcmp(force_ai_env, "on") == 0);
-
-    if (force_ai_running) {
-        std::cout << "[AI] force running enabled, gesture start gate bypassed\n";
-    }
 
     while (!exit_requested_) {
         FramePtr frame;
@@ -525,39 +532,28 @@ void VisionApp::aiLoop() {
         }
         last_ai_frame_id = frame->id;
 
-        const bool running_mode = force_ai_running || state_.load() == SystemState::Running;
+        const bool running_mode = (state_.load() == SystemState::Running);
         const AiScheduleDecision decision = ai_scheduler_.next(frame->timestamp_ms, running_mode);
         if (!decision.run_gesture && !decision.run_pose && !decision.run_cup) {
             continue;
         }
 
+        perf_.ai_iterations.fetch_add(1, std::memory_order_relaxed);
+
         if (config_.debug_ai_delay_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.debug_ai_delay_ms));
         }
 
-        // 6.19加
         const CropRect full_frame_crop{0, 0, frame->width, frame->height};
-        auto preprocessInput = [&](
-                                const char* model_name,
-                                int width,
-                                int height,
-                                Frame& output,
-                                PreprocessTransform* transform = nullptr) {
+        auto preprocessInput = [&](const char* model_name, int width, int height, Frame& output) {
             if (!image_processor_.cropResize(*frame, full_frame_crop, width, height, output)) {
                 std::cerr << "[AI] image preprocess failed, model=" << model_name
-                        << ", frame=" << frame->id
-                        << ", source_format=" << static_cast<int>(frame->format)
-                        << ", input=" << width << "x" << height << "\n";
+                          << ", frame=" << frame->id
+                          << ", input=" << width << "x" << height << "\n";
                 return false;
             }
-
-            if (transform != nullptr) {
-                *transform = makeTransform(*frame, full_frame_crop, output, config_.use_letterbox_preprocess);
-            }
-
             return true;
         };
-        // 6.19加
 
         if (decision.run_gesture) {
             Frame gesture_input;
@@ -572,6 +568,7 @@ void VisionApp::aiLoop() {
                           << ", input=" << gesture_input.width << "x" << gesture_input.height << "\n";
 
                 GestureResult gesture_result;
+                const auto gesture_begin = std::chrono::steady_clock::now();
                 try {
                     gesture_result = gesture_model_.infer(gesture_input);
                 } catch (const std::exception& e) {
@@ -587,59 +584,38 @@ void VisionApp::aiLoop() {
                     gesture_result.gesture_name = "gesture_infer_unknown_exception";
                     std::cerr << "[AI] gesture infer unknown exception\n";
                 }
+                perf_.gesture_infer.addSample(elapsedUs(gesture_begin));
 
-                updateOverlayGesture(gesture_result);
-
-                                switch (gesture_result.type) {
+                switch (gesture_result.type) {
                     case GestureType::Start:
                     {
                         requestStartByGesture();
-
-                        // Start 只负责进入 Running，不显示爱心。
-                        // 顺手把屏幕恢复成普通表情，避免 ST7789 保持上一次爱心画面。
-                        display_queue_.push(DisplayFace::NormalFace);
-
-                        std::cout << "[AI] gesture start, class="
-                                  << gesture_result.gesture_name
-                                  << ", DisplayFace pushed=NormalFace\n";
+                        publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "start");
                         break;
                     }
-
                     case GestureType::Stop:
                     {
                         requestStopByGesture();
-
-                        // Stop 只负责停止，可以显示 SleepFace。
-                        display_queue_.push(DisplayFace::SleepFace);
-
-                        std::cout << "[AI] gesture stop, class="
-                                  << gesture_result.gesture_name
-                                  << ", DisplayFace pushed=SleepFace\n";
+                        publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "stop");
                         break;
                     }
-
                     case GestureType::Heart:
                     {
-                        display_queue_.push(DisplayFace::GestureOkFace);
-
-                        std::cout << "[AI] gesture heart, class="
-                                  << gesture_result.gesture_name
-                                  << ", DisplayFace pushed=GestureOkFace\n";
+                        publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "heart");
                         break;
                     }
-
                     case GestureType::Like:
                     {
-                        display_queue_.push(DisplayFace::SmileFace);
-
-                        std::cout << "[AI] gesture like, class="
-                                  << gesture_result.gesture_name
-                                  << ", DisplayFace pushed=SmileFace\n";
+                        std::cout << "[Gesture] like accepted\n";
+                        queueMqttEvent(
+                            config_,
+                            mqtt_queue_,
+                            "gesture_like",
+                            "Like gesture detected",
+                            false);
                         break;
                     }
-
                     case GestureType::None:
-                    default:
                         break;
                 }
             }
@@ -663,13 +639,11 @@ void VisionApp::aiLoop() {
         if (config_.use_three_model_pipeline) {
             if (decision.run_pose) {
                 Frame pose_input;
-                PreprocessTransform pose_transform;
                 if (!preprocessInput(
                         "pose",
                         config_.pose_input_width,
                         config_.pose_input_height,
-                        pose_input,
-                        &pose_transform)) {
+                        pose_input)) {
                     std::cerr << "[AI] skip pose inference, frame=" << frame->id << "\n";
                     last_pose_result = PoseResult{};
                     last_pose_result.frame_id = frame->id;
@@ -680,9 +654,9 @@ void VisionApp::aiLoop() {
                 } else {
                     std::cout << "[AI] schedule pose, frame=" << pose_input.id
                               << ", input=" << pose_input.width << "x" << pose_input.height << "\n";
+                    const auto pose_begin = std::chrono::steady_clock::now();
                     try {
                         last_pose_result = pose_model_.infer(pose_input);
-                        mapPoseToOriginal(last_pose_result, pose_transform);
                     } catch (const std::exception& e) {
                         last_pose_result = PoseResult{};
                         last_pose_result.frame_id = pose_input.id;
@@ -698,6 +672,7 @@ void VisionApp::aiLoop() {
                         last_pose_result.message = "pose_infer_unknown_exception";
                         std::cerr << "[AI] pose infer unknown exception\n";
                     }
+                    perf_.pose_infer.addSample(elapsedUs(pose_begin));
                     has_pose_result = true;
                     std::cout << "[AI] pose result valid=" << (last_pose_result.valid ? "true" : "false")
                               << ", message=" << last_pose_result.message << "\n";
@@ -706,13 +681,11 @@ void VisionApp::aiLoop() {
 
             if (decision.run_cup) {
                 Frame cup_input;
-                PreprocessTransform cup_transform;
                 if (!preprocessInput(
                         "cup",
                         config_.cup_input_width,
                         config_.cup_input_height,
-                        cup_input,
-                        &cup_transform)) {
+                        cup_input)) {
                     std::cerr << "[AI] skip cup inference, frame=" << frame->id << "\n";
                     last_cup_result = CupResult{};
                     last_cup_result.frame_id = frame->id;
@@ -723,9 +696,9 @@ void VisionApp::aiLoop() {
                 } else {
                     std::cout << "[AI] schedule cup, frame=" << cup_input.id
                               << ", input=" << cup_input.width << "x" << cup_input.height << "\n";
+                    const auto cup_begin = std::chrono::steady_clock::now();
                     try {
                         last_cup_result = cup_model_.infer(cup_input);
-                        mapCupToOriginal(last_cup_result, cup_transform);
                     } catch (const std::exception& e) {
                         last_cup_result = CupResult{};
                         last_cup_result.frame_id = cup_input.id;
@@ -741,6 +714,7 @@ void VisionApp::aiLoop() {
                         last_cup_result.message = "cup_infer_unknown_exception";
                         std::cerr << "[AI] cup infer unknown exception\n";
                     }
+                    perf_.cup_infer.addSample(elapsedUs(cup_begin));
                     has_cup_result = true;
                     std::cout << "[AI] cup result valid=" << (last_cup_result.valid ? "true" : "false")
                               << ", message=" << last_cup_result.message << "\n";
@@ -828,19 +802,30 @@ void VisionApp::aiLoop() {
 
         web_.publishResult(result);
         enqueueAlarmMessages(result);
-        updateOverlayPerception(
-            last_pose_result,
-            last_cup_result,
-            buildAppState(&result, posture_state, drink_state, std::string()));
         publishDisplayState(&result, posture_state, drink_state, std::string());
     }
 }
 
 void VisionApp::mqttLoop() {
     while (true) {
-        auto item = mqtt_queue_.pop();
+        if (config_.enable_mqtt) {
+            std::vector<MqttMessage> periodic_messages;
+            collectPeriodicMqttMessages(config_, periodic_messages);
+            for (const auto& message : periodic_messages) {
+                try {
+                    mqtt_.publish(message);
+                } catch (const std::exception& e) {
+                    std::cerr << "[MQTT] publish exception: " << e.what() << "\n";
+                }
+            }
+        }
+
+        auto item = mqtt_queue_.popFor(std::chrono::milliseconds(200));
         if (!item.has_value()) {
-            break;
+            if (exit_requested_.load()) {
+                break;
+            }
+            continue;
         }
 
         try {
@@ -851,31 +836,16 @@ void VisionApp::mqttLoop() {
     }
 }
 
-// 优化1(但是优化后cpu没有减少可恶)
 void VisionApp::displayLoop() {
-    bool has_last_face = false;
-    DisplayFace last_face = DisplayFace::NormalFace;
-
+    display_.tick();
     while (!exit_requested_) {
-        auto item = display_queue_.pop();
-        if (!item.has_value()) {
-            break;
+        auto item = display_queue_.popFor(std::chrono::milliseconds(200));
+        if (item.has_value()) {
+            const auto display_begin = std::chrono::steady_clock::now();
+            display_.showFace(*item);
+            perf_.display_show.addSample(elapsedUs(display_begin));
         }
-
-        const DisplayFace current_face = *item;
-
-        // 表情没有变化时，不重复刷新 ST7789
-        if (has_last_face && current_face == last_face) {
-            continue;
-        }
-
-        has_last_face = true;
-        last_face = current_face;
-
-        std::cout << "[Display] refresh face="
-                  << static_cast<int>(current_face) << "\n";
-
-        display_.showFace(current_face);
+        display_.tick();
     }
 }
 
@@ -906,34 +876,13 @@ void VisionApp::enqueueAlarmMessages(const VisionResult& result) {
         return;
     }
 
-    const AppConfig config = config_;
-
     if (result.bad_posture) {
-        mqtt_queue_.push(MqttMessage{
-            config.posture_alarm_topic,
-            "{\"type\":\"bad_posture\",\"frame_id\":" + std::to_string(result.frame_id) + "}",
-            0,
-            false
-        });
+        queueMqttEvent(config_, mqtt_queue_, "bad_posture", "Please sit up", true);
     }
 
     if (result.drink_reminder) {
-        mqtt_queue_.push(MqttMessage{
-            config.drink_remind_topic,
-            "{\"type\":\"drink_reminder\",\"frame_id\":" + std::to_string(result.frame_id) + "}",
-            0,
-            false
-        });
+        queueMqttEvent(config_, mqtt_queue_, "drink_remind", "Time to drink water", true);
     }
-
-    std::ostringstream oss;
-    oss << "{\"frame_id\":" << result.frame_id
-        << ",\"bad_posture\":" << (result.bad_posture ? "true" : "false")
-        << ",\"drink_detected\":" << (result.drink_detected ? "true" : "false")
-        << ",\"box_count\":" << result.boxes.size()
-        << "}";
-
-    mqtt_queue_.push(MqttMessage{config.result_topic, oss.str(), 0, false});
 }
 
 VisionResult VisionApp::composeVisionResult(
@@ -1014,6 +963,8 @@ void VisionApp::publishDisplayState(
     DrinkState drink_state,
     const std::string& gesture_name) {
     const AppState state = buildAppState(result, posture_state, drink_state, gesture_name);
+    updateLatestMqttAppState(state);
+
     if (!display_queue_.push(state.display_face)) {
         std::cerr << "[DisplayState] warning: display queue rejected face="
                   << static_cast<int>(state.display_face)
@@ -1023,10 +974,12 @@ void VisionApp::publishDisplayState(
     web_.publishAppState(state);
 
     if (config_.enable_mqtt) {
-        const std::string payload = appStateToJson(state);
-        if (!mqtt_queue_.push(MqttMessage{config_.app_state_topic, payload, 0, false})) {
-            std::cerr << "[DisplayState] warning: mqtt queue rejected app state, frame_id="
-                      << state.frame_id << "\n";
+        if (gesture_name == "start") {
+            queueMqttEvent(config_, mqtt_queue_, "gesture_start", "Start gesture detected", false);
+        } else if (gesture_name == "stop") {
+            queueMqttEvent(config_, mqtt_queue_, "gesture_stop", "Stop gesture detected", false);
+        } else if (gesture_name == "heart") {
+            queueMqttEvent(config_, mqtt_queue_, "gesture_heart", "Heart gesture detected", false);
         }
     }
 
@@ -1036,249 +989,6 @@ void VisionApp::publishDisplayState(
               << ", posture_state=" << static_cast<int>(state.posture_state)
               << ", drink_state=" << static_cast<int>(state.drink_state)
               << ", display_face=" << static_cast<int>(state.display_face) << "\n";
-}
-
-void VisionApp::updateOverlayGesture(const GestureResult& gesture) {
-    std::lock_guard<std::mutex> lock(overlay_mutex_);
-    latest_overlay_ai_.gesture = gesture;
-    latest_overlay_ai_.frame_id = gesture.frame_id;
-    latest_overlay_ai_.timestamp_ms = gesture.timestamp_ms;
-}
-
-void VisionApp::updateOverlayPerception(
-    const PoseResult& pose,
-    const CupResult& cup,
-    const AppState& state) {
-    std::lock_guard<std::mutex> lock(overlay_mutex_);
-    latest_overlay_ai_.pose = pose;
-    latest_overlay_ai_.cup = cup;
-    latest_overlay_ai_.frame_id = state.frame_id;
-    latest_overlay_ai_.timestamp_ms = state.timestamp_ms;
-    latest_overlay_state_ = state;
-}
-
-bool VisionApp::applyVideoOverlay(const Frame& src, Frame& dst) {
-    if (!overlay_runtime_enabled_) {
-        return false;
-    }
-
-#if defined(RV1126B_HAS_OPENCV)
-    if (src.width <= 0 || src.height <= 0 || src.data.empty()) {
-        return false;
-    }
-    if ((src.width % 2) != 0 || (src.height % 2) != 0) {
-        std::cerr << "[Overlay] disabled for odd frame size "
-                  << src.width << "x" << src.height << "\n";
-        return false;
-    }
-
-    AiResultBundle ai_snapshot;
-    AppState state_snapshot;
-    {
-        std::lock_guard<std::mutex> lock(overlay_mutex_);
-        ai_snapshot = latest_overlay_ai_;
-        state_snapshot = latest_overlay_state_;
-    }
-
-    cv::Mat bgr;
-    try {
-        if (src.format == PixelFormat::NV12) {
-            const std::size_t required =
-                static_cast<std::size_t>(src.width) *
-                static_cast<std::size_t>(src.height) * 3U / 2U;
-            if (src.data.size() < required) {
-                return false;
-            }
-            cv::Mat nv12(src.height + src.height / 2, src.width, CV_8UC1,
-                         const_cast<uint8_t*>(src.data.data()));
-            cv::cvtColor(nv12, bgr, cv::COLOR_YUV2BGR_NV12);
-        } else if (src.format == PixelFormat::BGR888) {
-            if (src.channels < 3) {
-                return false;
-            }
-            cv::Mat input(src.height, src.width, CV_8UC3,
-                          const_cast<uint8_t*>(src.data.data()));
-            input.copyTo(bgr);
-        } else if (src.format == PixelFormat::RGB888) {
-            if (src.channels < 3) {
-                return false;
-            }
-            cv::Mat input(src.height, src.width, CV_8UC3,
-                          const_cast<uint8_t*>(src.data.data()));
-            cv::cvtColor(input, bgr, cv::COLOR_RGB2BGR);
-        } else {
-            return false;
-        }
-
-        auto clampRect = [&](const Box& box) {
-            const int x0 = std::clamp(static_cast<int>(std::round(box.x)), 0, src.width - 1);
-            const int y0 = std::clamp(static_cast<int>(std::round(box.y)), 0, src.height - 1);
-            const int x1 = std::clamp(static_cast<int>(std::round(box.x + box.w)), 0, src.width - 1);
-            const int y1 = std::clamp(static_cast<int>(std::round(box.y + box.h)), 0, src.height - 1);
-            return cv::Rect(cv::Point(std::min(x0, x1), std::min(y0, y1)),
-                            cv::Point(std::max(x0 + 1, x1), std::max(y0 + 1, y1)));
-        };
-
-        auto drawLabel = [&](const std::string& text, int x, int y, const cv::Scalar& color) {
-            if (text.empty()) {
-                return;
-            }
-            const int baseline = 0;
-            const cv::Point origin(std::clamp(x, 0, std::max(0, src.width - 1)),
-                                   std::clamp(y, 12, std::max(12, src.height - 1)));
-            cv::putText(bgr, text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
-            cv::putText(bgr, text, origin, cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv::LINE_AA);
-            (void)baseline;
-        };
-
-        const cv::Scalar person_color(0, 255, 0);
-        const cv::Scalar cup_color(255, 160, 0);
-        const cv::Scalar keypoint_color(0, 255, 255);
-        const cv::Scalar skeleton_color(255, 255, 0);
-        const cv::Scalar text_color(255, 255, 255);
-
-        if (ai_snapshot.pose.has_value() && ai_snapshot.pose->valid && ai_snapshot.pose->has_person) {
-            const cv::Rect rect = clampRect(ai_snapshot.pose->person_box);
-            cv::rectangle(bgr, rect, person_color, 2);
-            drawLabel("person", rect.x, std::max(14, rect.y - 4), person_color);
-
-            static const std::array<std::pair<int, int>, 16> skeleton{{
-                {0, 1}, {0, 2}, {1, 3}, {2, 4},
-                {5, 6}, {5, 7}, {7, 9}, {6, 8},
-                {8, 10}, {5, 11}, {6, 12}, {11, 12},
-                {11, 13}, {13, 15}, {12, 14}, {14, 16}
-            }};
-
-            auto validKeypoint = [&](int index) {
-                return index >= 0 &&
-                       index < static_cast<int>(ai_snapshot.pose->keypoints.size()) &&
-                       ai_snapshot.pose->keypoints[static_cast<std::size_t>(index)].score >=
-                           config_.pose_keypoint_score_threshold;
-            };
-
-            for (const auto& link : skeleton) {
-                if (!validKeypoint(link.first) || !validKeypoint(link.second)) {
-                    continue;
-                }
-                const PoseKeypoint& a = ai_snapshot.pose->keypoints[static_cast<std::size_t>(link.first)];
-                const PoseKeypoint& b = ai_snapshot.pose->keypoints[static_cast<std::size_t>(link.second)];
-                cv::line(bgr,
-                         cv::Point(static_cast<int>(std::round(a.x)), static_cast<int>(std::round(a.y))),
-                         cv::Point(static_cast<int>(std::round(b.x)), static_cast<int>(std::round(b.y))),
-                         skeleton_color,
-                         2,
-                         cv::LINE_AA);
-            }
-
-            for (const PoseKeypoint& keypoint : ai_snapshot.pose->keypoints) {
-                if (keypoint.score < config_.pose_keypoint_score_threshold) {
-                    continue;
-                }
-                const int x = std::clamp(static_cast<int>(std::round(keypoint.x)), 0, src.width - 1);
-                const int y = std::clamp(static_cast<int>(std::round(keypoint.y)), 0, src.height - 1);
-                cv::circle(bgr, cv::Point(x, y), 3, keypoint_color, -1, cv::LINE_AA);
-            }
-        }
-
-        if (ai_snapshot.cup.has_value() && ai_snapshot.cup->valid) {
-            std::vector<Box> cups = ai_snapshot.cup->cups;
-            if (cups.empty() && ai_snapshot.cup->cup_box.w > 0.0F && ai_snapshot.cup->cup_box.h > 0.0F) {
-                cups.push_back(ai_snapshot.cup->cup_box);
-            }
-            for (const Box& cup : cups) {
-                const cv::Rect rect = clampRect(cup);
-                cv::rectangle(bgr, rect, cup_color, 2);
-                drawLabel(cup.label.empty() ? "cup" : cup.label, rect.x, std::max(14, rect.y - 4), cup_color);
-            }
-        }
-
-        const auto postureText = [](PostureState state) {
-            switch (state) {
-                case PostureState::Good:
-                    return "NORMAL";
-                case PostureState::BadPending:
-                case PostureState::BadAlert:
-                    return "HUNCHBACK";
-                case PostureState::Unknown:
-                    return "UNKNOWN";
-            }
-            return "UNKNOWN";
-        };
-
-        const auto drinkText = [](DrinkState state) {
-            switch (state) {
-                case DrinkState::DrinkDetected:
-                    return "DRINKING";
-                case DrinkState::NeedRemind:
-                    return "NEED_DRINK";
-                case DrinkState::Normal:
-                    return "NO_DRINK";
-            }
-            return "UNKNOWN";
-        };
-
-        std::string gesture_text = "none";
-        if (ai_snapshot.gesture.has_value()) {
-            gesture_text = ai_snapshot.gesture->gesture_name.empty()
-                               ? toString(ai_snapshot.gesture->type)
-                               : ai_snapshot.gesture->gesture_name;
-        }
-
-        const bool ai_running =
-            state_.load() == SystemState::Running ||
-            ai_snapshot.pose.has_value() ||
-            ai_snapshot.cup.has_value() ||
-            ai_snapshot.gesture.has_value();
-
-        int text_y = 22;
-        drawLabel("AI: " + std::string(ai_running ? "running" : "idle"), 10, text_y, text_color);
-        text_y += 20;
-        drawLabel("Frame: " + std::to_string(src.id), 10, text_y, text_color);
-        text_y += 20;
-        drawLabel("Gesture: " + gesture_text, 10, text_y, text_color);
-        text_y += 20;
-        drawLabel("Posture: " + std::string(postureText(state_snapshot.posture_state)), 10, text_y, text_color);
-        text_y += 20;
-        drawLabel("Drink: " + std::string(drinkText(state_snapshot.drink_state)), 10, text_y, text_color);
-
-        cv::Mat i420;
-        cv::cvtColor(bgr, i420, cv::COLOR_BGR2YUV_I420);
-
-        const std::size_t y_size = static_cast<std::size_t>(src.width) *
-                                   static_cast<std::size_t>(src.height);
-        const std::size_t uv_plane_size = y_size / 4U;
-        dst.id = src.id;
-        dst.width = src.width;
-        dst.height = src.height;
-        dst.channels = 1;
-        dst.format = PixelFormat::NV12;
-        dst.timestamp_ms = src.timestamp_ms;
-        dst.data.resize(y_size + y_size / 2U);
-
-        const uint8_t* y_plane = i420.data;
-        const uint8_t* u_plane = y_plane + y_size;
-        const uint8_t* v_plane = u_plane + uv_plane_size;
-        std::memcpy(dst.data.data(), y_plane, y_size);
-        for (int y = 0; y < src.height / 2; ++y) {
-            for (int x = 0; x < src.width / 2; ++x) {
-                const std::size_t uv_index =
-                    y_size + static_cast<std::size_t>(y * src.width + x * 2);
-                const std::size_t src_index =
-                    static_cast<std::size_t>(y * (src.width / 2) + x);
-                dst.data[uv_index + 0] = u_plane[src_index];
-                dst.data[uv_index + 1] = v_plane[src_index];
-            }
-        }
-        return true;
-    } catch (const cv::Exception& e) {
-        std::cerr << "[Overlay] OpenCV draw failed: " << e.what() << "\n";
-        return false;
-    }
-#else
-    (void)src;
-    (void)dst;
-    return false;
-#endif
 }
 
 DisplayFace VisionApp::selectDisplayFace(const AppState& state) const {
@@ -1291,6 +1001,81 @@ DisplayFace VisionApp::selectDisplayFace(const AppState& state) const {
 
 bool VisionApp::shouldRunEncoderPipeline() const {
     return config_.enable_mpp_encoder || config_.enable_web_stream;
+}
+
+void VisionApp::logPerformanceIfDue() {
+    if (!config_.enable_perf_log) {
+        return;
+    }
+
+    const int64_t now_ms = nowMs();
+    int64_t last_log_ms = perf_.last_log_ms.load(std::memory_order_relaxed);
+    if (last_log_ms == 0) {
+        perf_.last_log_ms.store(now_ms, std::memory_order_relaxed);
+        return;
+    }
+
+    const int64_t interval_ms = std::max<int64_t>(200, config_.perf_log_interval_ms);
+    const int64_t elapsed_ms = now_ms - last_log_ms;
+    if (elapsed_ms < interval_ms) {
+        return;
+    }
+
+    if (!perf_.last_log_ms.compare_exchange_strong(last_log_ms, now_ms, std::memory_order_relaxed)) {
+        return;
+    }
+
+    auto consumeCounter = [](std::atomic<uint64_t>& value) -> uint64_t {
+        return value.exchange(0, std::memory_order_relaxed);
+    };
+    auto consumeAverageMs = [](PerfStat& stat) -> double {
+        const uint64_t count = stat.count.exchange(0, std::memory_order_relaxed);
+        const uint64_t total_us = stat.total_us.exchange(0, std::memory_order_relaxed);
+        if (count == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(total_us) / static_cast<double>(count) / 1000.0;
+    };
+
+    const double elapsed_s = static_cast<double>(elapsed_ms) / 1000.0;
+    const double cam_fps = elapsed_s > 0.0
+                               ? static_cast<double>(consumeCounter(perf_.camera_frames)) / elapsed_s
+                               : 0.0;
+    const double enc_fps = elapsed_s > 0.0
+                               ? static_cast<double>(consumeCounter(perf_.encoder_frames)) / elapsed_s
+                               : 0.0;
+    const double ai_fps = elapsed_s > 0.0
+                              ? static_cast<double>(consumeCounter(perf_.ai_iterations)) / elapsed_s
+                              : 0.0;
+
+    const double gesture_ms = consumeAverageMs(perf_.gesture_infer);
+    const double pose_ms = consumeAverageMs(perf_.pose_infer);
+    const double cup_ms = consumeAverageMs(perf_.cup_infer);
+    const double overlay_ms = consumeAverageMs(perf_.overlay);
+    const double enc_ms = consumeAverageMs(perf_.mpp_encode);
+    const double display_ms = consumeAverageMs(perf_.display_show);
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1)
+        << "[Perf] cam_fps=" << cam_fps
+        << ",enc_fps=" << enc_fps
+        << ",ai_fps=" << ai_fps
+        << ",gesture_ms=" << gesture_ms
+        << ",pose_ms=" << pose_ms
+        << ",cup_ms=" << cup_ms;
+
+    if (overlay_ms <= 0.0) {
+        oss << ",overlay_ms=NA";
+    } else {
+        oss << ",overlay_ms=" << overlay_ms;
+    }
+
+    oss << ",enc_ms=" << enc_ms
+        << ",display_ms=" << display_ms
+        << ",eq=" << encode_queue_.size()
+        << ",dq=" << display_queue_.size()
+        << ",mq=" << mqtt_queue_.size();
+    std::cout << oss.str() << "\n";
 }
 
 int64_t VisionApp::nowMs() {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -56,6 +57,33 @@ public:
     std::optional<T> pop() {
         std::unique_lock<std::mutex> lock(mutex_);
         not_empty_.wait(lock, [this] { return closed_ || !queue_.empty(); });
+        if (queue_.empty()) {
+            return std::nullopt;
+        }
+
+        T item = std::move(queue_.front());
+        queue_.pop_front();
+        not_full_.notify_one();
+        return item;
+    }
+
+    std::optional<T> tryPop() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.empty()) {
+            return std::nullopt;
+        }
+
+        T item = std::move(queue_.front());
+        queue_.pop_front();
+        not_full_.notify_one();
+        return item;
+    }
+
+    std::optional<T> popFor(const std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!not_empty_.wait_for(lock, timeout, [this] { return closed_ || !queue_.empty(); })) {
+            return std::nullopt;
+        }
         if (queue_.empty()) {
             return std::nullopt;
         }

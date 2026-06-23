@@ -3,9 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
+#include <ctime>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -39,6 +42,11 @@ void sleepMs(int milliseconds) {
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
 }
 
+int64_t steadyMs() {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+}
+
 uint8_t madctlForRotation(int rotation) {
     switch (rotation) {
         case 90:
@@ -65,8 +73,8 @@ const char* displayFaceToLogString(DisplayFace face) {
             return "DrinkOkFace";
         case DisplayFace::GESTURE_OK_FACE:
             return "GestureOkFace";
-        case DisplayFace::SMILE_FACE:
-            return "SmileFace";
+        case DisplayFace::IDLE_CLOCK:
+            return "IdleClock";
         case DisplayFace::SLEEP_FACE:
             return "SleepFace";
         case DisplayFace::ERROR_FACE:
@@ -74,6 +82,70 @@ const char* displayFaceToLogString(DisplayFace face) {
     }
     return "UnknownFace";
 }
+
+#if defined(RV1126B_HAS_LVGL)
+DisplayDevice* g_lvgl_display_device = nullptr;
+std::vector<uint16_t> g_lvgl_draw_buffer;
+
+#if LVGL_VERSION_MAJOR >= 9
+lv_display_t* g_lvgl_display = nullptr;
+
+void lvglFlush(lv_display_t* display, const lv_area_t* area, uint8_t* px_map) {
+    (void)display;
+    if (g_lvgl_display_device == nullptr || area == nullptr || px_map == nullptr) {
+        lv_display_flush_ready(display);
+        return;
+    }
+
+    const int width = static_cast<int>(area->x2 - area->x1 + 1);
+    const int height = static_cast<int>(area->y2 - area->y1 + 1);
+    (void)g_lvgl_display_device->drawRgb565Area(
+        static_cast<int>(area->x1),
+        static_cast<int>(area->y1),
+        width,
+        height,
+        reinterpret_cast<const uint16_t*>(px_map));
+    lv_display_flush_ready(display);
+}
+#else
+lv_disp_draw_buf_t g_lvgl_draw_buf;
+lv_disp_drv_t g_lvgl_disp_drv;
+
+void lvglFlush(lv_disp_drv_t* display, const lv_area_t* area, lv_color_t* color_p) {
+    if (g_lvgl_display_device == nullptr || area == nullptr || color_p == nullptr) {
+        lv_disp_flush_ready(display);
+        return;
+    }
+
+    const int width = static_cast<int>(area->x2 - area->x1 + 1);
+    const int height = static_cast<int>(area->y2 - area->y1 + 1);
+    (void)g_lvgl_display_device->drawRgb565Area(
+        static_cast<int>(area->x1),
+        static_cast<int>(area->y1),
+        width,
+        height,
+        reinterpret_cast<const uint16_t*>(color_p));
+    lv_disp_flush_ready(display);
+}
+#endif
+
+bool localTime(std::tm& output) {
+    const std::time_t now = std::time(nullptr);
+    if (now <= 0) {
+        return false;
+    }
+#if defined(_WIN32)
+    if (localtime_s(&output, &now) != 0) {
+        return false;
+    }
+#else
+    if (localtime_r(&now, &output) == nullptr) {
+        return false;
+    }
+#endif
+    return true;
+}
+#endif
 
 #ifdef __linux__
 bool writeTextFile(const std::string& path, const std::string& value) {
@@ -86,7 +158,6 @@ bool writeTextFile(const std::string& path, const std::string& value) {
 }
 
 bool prepareGpio(int gpio) {
-    // 如果 gpio 是 -1，说明这个 GPIO 不需要软件控制。
     if (gpio < 0) {
         return true;
     }
@@ -99,46 +170,94 @@ bool prepareGpio(int gpio) {
 }
 #endif
 
-#if defined(RV1126B_HAS_LVGL)
-DisplayDevice* g_lvgl_display_device = nullptr;
+}  // namespace
 
-#if LVGL_VERSION_MAJOR >= 9
-void lvglFlushCallback(lv_display_t* display, const lv_area_t* area, uint8_t* px_map) {
-    if (g_lvgl_display_device != nullptr && area != nullptr && px_map != nullptr) {
-        const int32_t width = area->x2 - area->x1 + 1;
-        const int32_t height = area->y2 - area->y1 + 1;
-        if (width > 0 && height > 0) {
-            const std::size_t bytes = static_cast<std::size_t>(width) *
-                                      static_cast<std::size_t>(height) * 2U;
-            (void)g_lvgl_display_device->flushLvglRgb565(
-                area->x1, area->y1, area->x2, area->y2, px_map, bytes);
-        }
-    }
-    lv_display_flush_ready(display);
-}
+struct DisplayDevice::LvglUiState {
+#if defined(RV1126B_HAS_LVGL)
+    bool styles_initialized{false};
+    lv_obj_t* root{nullptr};
+    lv_obj_t* title_label{nullptr};
+    lv_obj_t* time_label{nullptr};
+    lv_obj_t* date_label{nullptr};
+    lv_obj_t* seconds_arc{nullptr};
+    lv_obj_t* status_pill{nullptr};
+    lv_obj_t* status_label{nullptr};
+    lv_obj_t* breathing_dot{nullptr};
+
+    lv_style_t root_style;
+    lv_style_t title_style;
+    lv_style_t time_style;
+    lv_style_t date_style;
+    lv_style_t pill_style;
+    lv_style_t status_style;
+    lv_style_t dot_style;
+    lv_style_t arc_style;
+    lv_style_t arc_indicator_style;
+#endif
+};
+
+DisplayDevice::DisplayDevice() = default;
+
+#if defined(RV1126B_HAS_LVGL)
+namespace {
+
+const lv_font_t* pickTitleFont() {
+#if defined(LV_FONT_MONTSERRAT_24) && LV_FONT_MONTSERRAT_24
+    return &lv_font_montserrat_24;
+#elif defined(LV_FONT_MONTSERRAT_20) && LV_FONT_MONTSERRAT_20
+    return &lv_font_montserrat_20;
 #else
-void lvglFlushCallback(lv_disp_drv_t* display, const lv_area_t* area, lv_color_t* px_map) {
-    if (g_lvgl_display_device != nullptr && area != nullptr && px_map != nullptr) {
-        const int32_t width = area->x2 - area->x1 + 1;
-        const int32_t height = area->y2 - area->y1 + 1;
-        if (width > 0 && height > 0) {
-            const std::size_t bytes = static_cast<std::size_t>(width) *
-                                      static_cast<std::size_t>(height) * 2U;
-            (void)g_lvgl_display_device->flushLvglRgb565(
-                area->x1,
-                area->y1,
-                area->x2,
-                area->y2,
-                reinterpret_cast<const uint8_t*>(px_map),
-                bytes);
-        }
-    }
-    lv_disp_flush_ready(display);
+    return LV_FONT_DEFAULT;
+#endif
 }
+
+const lv_font_t* pickSubtitleFont() {
+#if defined(LV_FONT_MONTSERRAT_14) && LV_FONT_MONTSERRAT_14
+    return &lv_font_montserrat_14;
+#elif defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
+    return &lv_font_montserrat_16;
+#else
+    return LV_FONT_DEFAULT;
 #endif
+}
+
+const lv_font_t* pickTimeFont() {
+#if defined(LV_FONT_MONTSERRAT_48) && LV_FONT_MONTSERRAT_48
+    return &lv_font_montserrat_48;
+#elif defined(LV_FONT_MONTSERRAT_32) && LV_FONT_MONTSERRAT_32
+    return &lv_font_montserrat_32;
+#elif defined(LV_FONT_MONTSERRAT_24) && LV_FONT_MONTSERRAT_24
+    return &lv_font_montserrat_24;
+#else
+    return LV_FONT_DEFAULT;
 #endif
+}
+
+const lv_font_t* pickDateFont() {
+#if defined(LV_FONT_MONTSERRAT_16) && LV_FONT_MONTSERRAT_16
+    return &lv_font_montserrat_16;
+#elif defined(LV_FONT_MONTSERRAT_14) && LV_FONT_MONTSERRAT_14
+    return &lv_font_montserrat_14;
+#else
+    return LV_FONT_DEFAULT;
+#endif
+}
+
+void breathingDotAnim(void* object, int32_t value) {
+    auto* dot = static_cast<lv_obj_t*>(object);
+    if (dot == nullptr) {
+        return;
+    }
+    lv_obj_set_style_bg_opa(dot, static_cast<lv_opa_t>(value), 0);
+    lv_obj_set_style_shadow_opa(dot, static_cast<lv_opa_t>(value), 0);
+}
 
 }  // namespace
+#endif
+
+DisplayDevice::~DisplayDevice() {
+    close();
+}
 
 bool DisplayDevice::open(const AppConfig& config) {
     config_ = config;
@@ -189,50 +308,87 @@ bool DisplayDevice::open(const AppConfig& config) {
         std::cout << "[Display] ST7789 open, spi=" << config.st7789_spi_device
                   << ", speed=" << config.st7789_spi_speed_hz
                   << ", size=" << config.st7789_width << "x" << config.st7789_height << "\n";
-        if (config_.enable_lvgl_display) {
-            if (!openLvgl()) {
-                close();
-                return false;
-            }
-        } else {
-            std::cout << "[Display] legacy ST7789 renderer enabled\n";
-            showHeartExpression();
-        }
-        return opened_;
     }
     return opened_;
 }
 
 void DisplayDevice::showFace(DisplayFace face) {
-    if (config_.enable_lvgl_display) {
-        std::cout << "[Display][LVGL] ignore legacy face="
-                  << static_cast<int>(face) << "\n";
+    if (config_.enable_lvgl_display && config_.lvgl_idle_only_test) {
+        if (face == DisplayFace::IDLE_CLOCK) {
+            showIdleClock();
+        } else {
+            std::cout << "[Display][LVGL] face event ignored in idle-only test mode\n";
+        }
         return;
     }
 
     if (!opened_) {
-        std::cout << "[DisplayMock] face=" << toString(face) << "\n";
+        std::cout << "[DisplayMock] face=" << displayFaceToLogString(face) << "\n";
         return;
     }
 
+    /*
+     * 第一版只打通业务状态到显示接口：
+     * GESTURE_OK_FACE 复用已有比心表情；其他表情先日志占位，后续再补真实图案。
+     */
     if (face == DisplayFace::GESTURE_OK_FACE) {
         showHeartExpression();
         return;
     }
 
-    if (face == DisplayFace::SMILE_FACE) {
-        showSmileExpression();
+    std::cout << "[Display] " << displayFaceToLogString(face) << "\n";
+}
+
+void DisplayDevice::tick() {
+    if (!config_.enable_display || !config_.enable_lvgl_display || !config_.lvgl_idle_only_test) {
         return;
     }
 
-    std::cout << "[Display] " << toString(face) << "\n";
+#if defined(RV1126B_HAS_LVGL)
+    if (!ensureLvglInitialized()) {
+        return;
+    }
+
+    const int64_t now_ms = steadyMs();
+    if (lvgl_last_tick_ms_ <= 0) {
+        lvgl_last_tick_ms_ = now_ms;
+    }
+    const int64_t delta_ms = std::max<int64_t>(0, now_ms - lvgl_last_tick_ms_);
+    lvgl_last_tick_ms_ = now_ms;
+    if (delta_ms > 0) {
+        lv_tick_inc(static_cast<uint32_t>(delta_ms));
+    }
+
+    updateIdleClock(false);
+    (void)lv_timer_handler();
+#else
+    if (!lvgl_compile_warning_printed_) {
+        std::cerr << "[Display][LVGL] requested but LVGL is not compiled in\n";
+        lvgl_compile_warning_printed_ = true;
+    }
+#endif
+}
+
+void DisplayDevice::showIdleClock() {
+    if (!config_.enable_display || !config_.enable_lvgl_display) {
+        return;
+    }
+
+#if defined(RV1126B_HAS_LVGL)
+    if (!ensureLvglInitialized()) {
+        return;
+    }
+    updateIdleClock(true);
+    (void)lv_timer_handler();
+#else
+    if (!lvgl_compile_warning_printed_) {
+        std::cerr << "[Display][LVGL] requested but LVGL is not compiled in\n";
+        lvgl_compile_warning_printed_ = true;
+    }
+#endif
 }
 
 void DisplayDevice::showHeartExpression() {
-    if (config_.enable_lvgl_display) {
-        std::cout << "[Display][LVGL] heart expression ignored by LVGL backend\n";
-        return;
-    }
     if (!config_.enable_display) {
         std::cout << "[Display] mock heart expression\n";
         return;
@@ -241,144 +397,28 @@ void DisplayDevice::showHeartExpression() {
         return;
     }
 
-    const int width = config_.st7789_width;
-    const int height = config_.st7789_height;
-
-    std::vector<uint16_t> pixels(
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height),
-        0x0000);  // black
-
-    const auto setPixel = [&](int x, int y, uint16_t color) {
-        if (x < 0 || y < 0 || x >= width || y >= height) {
-            return;
-        }
-        pixels[static_cast<std::size_t>(y * width + x)] = color;
-    };
-
-    const auto fillCircle = [&](int cx, int cy, int r, uint16_t color) {
-        for (int y = cy - r; y <= cy + r; ++y) {
-            for (int x = cx - r; x <= cx + r; ++x) {
-                const int dx = x - cx;
-                const int dy = y - cy;
-                if (dx * dx + dy * dy <= r * r) {
-                    setPixel(x, y, color);
-                }
-            }
-        }
-    };
-
-    const uint16_t pink = 0xF81F;
-    const uint16_t white = 0xFFFF;
-
-    const int cx = width / 2;
-    const int cy = height / 2 + 10;
-    const int r = std::min(width, height) / 7;
-
-    fillCircle(cx - r, cy - r, r, pink);
-    fillCircle(cx + r, cy - r, r, pink);
-
-    for (int y = cy - r; y <= cy + 3 * r; ++y) {
-        for (int x = cx - 3 * r; x <= cx + 3 * r; ++x) {
-            const int dx = std::abs(x - cx);
-            const int dy = y - cy;
-            if (dy >= -r && dx + dy < 3 * r) {
-                setPixel(x, y, pink);
+    /*
+     * 保留已有比心表情接口。
+     * 真实项目建议把 240x240 PNG 离线转换成 RGB565 数组，这里仍用 16x16 示例图案。
+     */
+    std::array<uint16_t, 16 * 16> pixels{};
+    pixels.fill(0x0000);
+    for (int y = 3; y < 13; ++y) {
+        for (int x = 3; x < 13; ++x) {
+            const int dx = x - 8;
+            const int dy = y - 8;
+            if ((dx * dx + dy * dy) < 35 || (y > 8 && x > 5 && x < 11)) {
+                pixels[static_cast<std::size_t>(y * 16 + x)] = 0xF81F;
             }
         }
     }
 
-    // 简单白色边框
-    for (int i = 0; i < width; ++i) {
-        setPixel(i, 0, white);
-        setPixel(i, height - 1, white);
-    }
-    for (int i = 0; i < height; ++i) {
-        setPixel(0, i, white);
-        setPixel(width - 1, i, white);
-    }
-
-    (void)drawRgb565Bitmap(pixels.data(), width, height);
+    (void)drawRgb565Bitmap(pixels.data(), 16, 16);
     std::cout << "[Display] show heart expression\n";
 }
 
-void DisplayDevice::showSmileExpression() {
-    if (config_.enable_lvgl_display) {
-        std::cout << "[Display][LVGL] smile expression ignored by LVGL backend\n";
-        return;
-    }
-    if (!config_.enable_display) {
-        std::cout << "[Display] mock smile expression\n";
-        return;
-    }
-    if (!opened_) {
-        return;
-    }
-
-    const int width = config_.st7789_width;
-    const int height = config_.st7789_height;
-
-    std::vector<uint16_t> pixels(
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height),
-        0x0000);  // black
-
-    const auto setPixel = [&](int x, int y, uint16_t color) {
-        if (x < 0 || y < 0 || x >= width || y >= height) {
-            return;
-        }
-        pixels[static_cast<std::size_t>(y * width + x)] = color;
-    };
-
-    const auto fillCircle = [&](int cx, int cy, int r, uint16_t color) {
-        for (int y = cy - r; y <= cy + r; ++y) {
-            for (int x = cx - r; x <= cx + r; ++x) {
-                const int dx = x - cx;
-                const int dy = y - cy;
-                if (dx * dx + dy * dy <= r * r) {
-                    setPixel(x, y, color);
-                }
-            }
-        }
-    };
-
-    const uint16_t yellow = 0xFFE0;
-    const uint16_t black = 0x0000;
-    const uint16_t white = 0xFFFF;
-
-    const int cx = width / 2;
-    const int cy = height / 2;
-    const int face_r = std::min(width, height) / 3;
-
-    // 脸
-    fillCircle(cx, cy, face_r, yellow);
-
-    // 眼睛
-    fillCircle(cx - face_r / 3, cy - face_r / 4, face_r / 10, black);
-    fillCircle(cx + face_r / 3, cy - face_r / 4, face_r / 10, black);
-
-    // 微笑，用简单抛物线画
-    for (int x = -face_r / 2; x <= face_r / 2; ++x) {
-        const int y = (x * x) / (face_r * 2);
-        for (int t = -2; t <= 2; ++t) {
-            setPixel(cx + x, cy + face_r / 5 + y + t, black);
-        }
-    }
-
-    // 白色边框
-    for (int i = 0; i < width; ++i) {
-        setPixel(i, 0, white);
-        setPixel(i, height - 1, white);
-    }
-    for (int i = 0; i < height; ++i) {
-        setPixel(0, i, white);
-        setPixel(width - 1, i, white);
-    }
-
-    (void)drawRgb565Bitmap(pixels.data(), width, height);
-    std::cout << "[Display] show smile expression\n";
-}
-
 void DisplayDevice::close() {
-    closeLvgl();
+    clearLvglPage();
 
     if (opened_) {
         (void)setGpio(config_.st7789_gpio_backlight, false);
@@ -392,6 +432,328 @@ void DisplayDevice::close() {
     }
 #endif
     opened_ = false;
+    lvgl_initialized_ = false;
+    idle_clock_visible_ = false;
+    idle_clock_last_second_ = -1;
+    idle_clock_last_update_ms_ = 0;
+    lvgl_last_tick_ms_ = 0;
+    lvgl_ui_.reset();
+}
+
+bool DisplayDevice::ensureLvglInitialized() {
+    if (lvgl_initialized_) {
+        return true;
+    }
+    if (!opened_ || !config_.enable_lvgl_display) {
+        return false;
+    }
+
+#if defined(RV1126B_HAS_LVGL)
+    lv_init();
+    g_lvgl_display_device = this;
+    const std::size_t buffer_pixels =
+        static_cast<std::size_t>(config_.st7789_width) * 40U;
+    g_lvgl_draw_buffer.assign(buffer_pixels, 0);
+
+#if LVGL_VERSION_MAJOR >= 9
+    g_lvgl_display = lv_display_create(config_.st7789_width, config_.st7789_height);
+    lv_display_set_flush_cb(g_lvgl_display, lvglFlush);
+    lv_display_set_buffers(
+        g_lvgl_display,
+        g_lvgl_draw_buffer.data(),
+        nullptr,
+        g_lvgl_draw_buffer.size() * sizeof(uint16_t),
+        LV_DISPLAY_RENDER_MODE_PARTIAL);
+#else
+    lv_disp_draw_buf_init(&g_lvgl_draw_buf, g_lvgl_draw_buffer.data(), nullptr, g_lvgl_draw_buffer.size());
+    lv_disp_drv_init(&g_lvgl_disp_drv);
+    g_lvgl_disp_drv.hor_res = config_.st7789_width;
+    g_lvgl_disp_drv.ver_res = config_.st7789_height;
+    g_lvgl_disp_drv.flush_cb = lvglFlush;
+    g_lvgl_disp_drv.draw_buf = &g_lvgl_draw_buf;
+    (void)lv_disp_drv_register(&g_lvgl_disp_drv);
+#endif
+
+    lvgl_ui_ = std::make_unique<LvglUiState>();
+    applyThemeStyles();
+    createIdleClockPage();
+
+    lvgl_initialized_ = true;
+    lvgl_last_tick_ms_ = steadyMs();
+    std::cout << "[Display][LVGL] enabled, resolution="
+              << config_.st7789_width << "x" << config_.st7789_height << "\n";
+    if (config_.lvgl_idle_only_test) {
+        std::cout << "[Display][LVGL] idle-only test mode\n";
+    }
+    std::cout << "[Display][LVGL] show IdleClock\n";
+    updateIdleClock(true);
+    idle_clock_visible_ = true;
+    return true;
+#else
+    if (!lvgl_compile_warning_printed_) {
+        std::cerr << "[Display][LVGL] requested but LVGL is not compiled in\n";
+        lvgl_compile_warning_printed_ = true;
+    }
+    return false;
+#endif
+}
+
+void DisplayDevice::clearLvglPage() {
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ == nullptr) {
+        return;
+    }
+
+    if (lvgl_ui_->breathing_dot != nullptr) {
+        lv_anim_del(lvgl_ui_->breathing_dot, nullptr);
+    }
+
+    if (lvgl_ui_->root != nullptr) {
+        lv_obj_del(lvgl_ui_->root);
+    }
+
+    lvgl_ui_->root = nullptr;
+    lvgl_ui_->title_label = nullptr;
+    lvgl_ui_->time_label = nullptr;
+    lvgl_ui_->date_label = nullptr;
+    lvgl_ui_->seconds_arc = nullptr;
+    lvgl_ui_->status_pill = nullptr;
+    lvgl_ui_->status_label = nullptr;
+    lvgl_ui_->breathing_dot = nullptr;
+#endif
+}
+
+void DisplayDevice::applyThemeStyles() {
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ == nullptr || lvgl_ui_->styles_initialized) {
+        return;
+    }
+
+    lv_style_init(&lvgl_ui_->root_style);
+    lv_style_set_bg_opa(&lvgl_ui_->root_style, LV_OPA_COVER);
+    lv_style_set_bg_color(&lvgl_ui_->root_style, lv_color_hex(0x06121B));
+    lv_style_set_bg_grad_color(&lvgl_ui_->root_style, lv_color_hex(0x0B1E2A));
+    lv_style_set_bg_grad_dir(&lvgl_ui_->root_style, LV_GRAD_DIR_VER);
+    lv_style_set_border_width(&lvgl_ui_->root_style, 0);
+    lv_style_set_pad_all(&lvgl_ui_->root_style, 0);
+    lv_style_set_radius(&lvgl_ui_->root_style, 0);
+
+    lv_style_init(&lvgl_ui_->title_style);
+    lv_style_set_text_color(&lvgl_ui_->title_style, lv_color_hex(0xF4FBFF));
+    lv_style_set_text_font(&lvgl_ui_->title_style, pickTitleFont());
+    lv_style_set_text_letter_space(&lvgl_ui_->title_style, 0);
+    lv_style_set_bg_opa(&lvgl_ui_->title_style, LV_OPA_TRANSP);
+
+    lv_style_init(&lvgl_ui_->time_style);
+    lv_style_set_text_color(&lvgl_ui_->time_style, lv_color_hex(0xF7FDFF));
+    lv_style_set_text_font(&lvgl_ui_->time_style, pickTimeFont());
+    lv_style_set_bg_opa(&lvgl_ui_->time_style, LV_OPA_TRANSP);
+
+    lv_style_init(&lvgl_ui_->date_style);
+    lv_style_set_text_color(&lvgl_ui_->date_style, lv_color_hex(0xB8E5F3));
+    lv_style_set_text_font(&lvgl_ui_->date_style, pickDateFont());
+    lv_style_set_bg_opa(&lvgl_ui_->date_style, LV_OPA_TRANSP);
+
+    lv_style_init(&lvgl_ui_->pill_style);
+    lv_style_set_radius(&lvgl_ui_->pill_style, 15);
+    lv_style_set_pad_top(&lvgl_ui_->pill_style, 6);
+    lv_style_set_pad_bottom(&lvgl_ui_->pill_style, 6);
+    lv_style_set_pad_left(&lvgl_ui_->pill_style, 14);
+    lv_style_set_pad_right(&lvgl_ui_->pill_style, 14);
+    lv_style_set_bg_color(&lvgl_ui_->pill_style, lv_color_hex(0x112028));
+    lv_style_set_bg_grad_color(&lvgl_ui_->pill_style, lv_color_hex(0x142933));
+    lv_style_set_bg_grad_dir(&lvgl_ui_->pill_style, LV_GRAD_DIR_HOR);
+    lv_style_set_bg_opa(&lvgl_ui_->pill_style, LV_OPA_80);
+    lv_style_set_border_width(&lvgl_ui_->pill_style, 1);
+    lv_style_set_border_color(&lvgl_ui_->pill_style, lv_color_hex(0x2ED9E8));
+    lv_style_set_border_opa(&lvgl_ui_->pill_style, static_cast<lv_opa_t>(89));
+
+    lv_style_init(&lvgl_ui_->status_style);
+    lv_style_set_text_color(&lvgl_ui_->status_style, lv_color_hex(0xD7F6FF));
+    lv_style_set_text_font(&lvgl_ui_->status_style, pickSubtitleFont());
+    lv_style_set_bg_opa(&lvgl_ui_->status_style, LV_OPA_TRANSP);
+
+    lv_style_init(&lvgl_ui_->dot_style);
+    lv_style_set_radius(&lvgl_ui_->dot_style, LV_RADIUS_CIRCLE);
+    lv_style_set_bg_color(&lvgl_ui_->dot_style, lv_color_hex(0x1EF2C3));
+    lv_style_set_bg_opa(&lvgl_ui_->dot_style, LV_OPA_70);
+    lv_style_set_shadow_width(&lvgl_ui_->dot_style, 12);
+    lv_style_set_shadow_color(&lvgl_ui_->dot_style, lv_color_hex(0x18E0F3));
+    lv_style_set_shadow_opa(&lvgl_ui_->dot_style, LV_OPA_50);
+    lv_style_set_border_width(&lvgl_ui_->dot_style, 0);
+
+    lv_style_init(&lvgl_ui_->arc_style);
+    lv_style_set_arc_width(&lvgl_ui_->arc_style, 8);
+    lv_style_set_arc_color(&lvgl_ui_->arc_style, lv_color_hex(0x163241));
+    lv_style_set_arc_opa(&lvgl_ui_->arc_style, LV_OPA_60);
+
+    lv_style_init(&lvgl_ui_->arc_indicator_style);
+    lv_style_set_arc_width(&lvgl_ui_->arc_indicator_style, 8);
+    lv_style_set_arc_color(&lvgl_ui_->arc_indicator_style, lv_color_hex(0x24DFF2));
+    lv_style_set_arc_opa(&lvgl_ui_->arc_indicator_style, LV_OPA_COVER);
+    lv_style_set_shadow_width(&lvgl_ui_->arc_indicator_style, 10);
+    lv_style_set_shadow_color(&lvgl_ui_->arc_indicator_style, lv_color_hex(0x24DFF2));
+    lv_style_set_shadow_opa(&lvgl_ui_->arc_indicator_style, LV_OPA_20);
+
+    lvgl_ui_->styles_initialized = true;
+#endif
+}
+
+void DisplayDevice::createStatusPill() {
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ == nullptr || lvgl_ui_->root == nullptr) {
+        return;
+    }
+
+    lvgl_ui_->status_pill = lv_obj_create(lvgl_ui_->root);
+    lv_obj_remove_style_all(lvgl_ui_->status_pill);
+    lv_obj_add_style(lvgl_ui_->status_pill, &lvgl_ui_->pill_style, 0);
+    lv_obj_set_size(lvgl_ui_->status_pill, 172, 30);
+    lv_obj_set_pos(lvgl_ui_->status_pill, 34, 198);
+    lv_obj_clear_flag(lvgl_ui_->status_pill, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_clip_corner(lvgl_ui_->status_pill, true, 0);
+
+    lvgl_ui_->status_label = lv_label_create(lvgl_ui_->status_pill);
+    lv_obj_add_style(lvgl_ui_->status_label, &lvgl_ui_->status_style, 0);
+    lv_label_set_text(lvgl_ui_->status_label, "Waiting for Gesture");
+    lv_obj_set_width(lvgl_ui_->status_label, 160);
+    lv_obj_set_style_text_align(lvgl_ui_->status_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lvgl_ui_->status_label, LV_ALIGN_CENTER, 0, 0);
+#endif
+}
+
+void DisplayDevice::createBreathingDot() {
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ == nullptr || lvgl_ui_->status_pill == nullptr) {
+        return;
+    }
+
+    lvgl_ui_->breathing_dot = lv_obj_create(lvgl_ui_->status_pill);
+    lv_obj_remove_style_all(lvgl_ui_->breathing_dot);
+    lv_obj_add_style(lvgl_ui_->breathing_dot, &lvgl_ui_->dot_style, 0);
+    lv_obj_set_size(lvgl_ui_->breathing_dot, 10, 10);
+    lv_obj_align(lvgl_ui_->breathing_dot, LV_ALIGN_LEFT_MID, 12, 0);
+    lv_obj_clear_flag(lvgl_ui_->breathing_dot, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, lvgl_ui_->breathing_dot);
+    lv_anim_set_values(&anim, LV_OPA_30, LV_OPA_COVER);
+    lv_anim_set_time(&anim, 1400);
+    lv_anim_set_playback_time(&anim, 1400);
+    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_exec_cb(&anim, breathingDotAnim);
+    lv_anim_start(&anim);
+#endif
+}
+
+void DisplayDevice::createIdleClockPage() {
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ == nullptr) {
+        return;
+    }
+
+    clearLvglPage();
+
+    lvgl_ui_->root = lv_obj_create(lv_scr_act());
+    lv_obj_remove_style_all(lvgl_ui_->root);
+    lv_obj_add_style(lvgl_ui_->root, &lvgl_ui_->root_style, 0);
+    lv_obj_set_size(lvgl_ui_->root, config_.st7789_width, config_.st7789_height);
+    lv_obj_center(lvgl_ui_->root);
+    lv_obj_clear_flag(lvgl_ui_->root, LV_OBJ_FLAG_SCROLLABLE);
+
+    lvgl_ui_->title_label = lv_label_create(lvgl_ui_->root);
+    lv_obj_add_style(lvgl_ui_->title_label, &lvgl_ui_->title_style, 0);
+    lv_label_set_text(lvgl_ui_->title_label, "Happy Life");
+    lv_obj_set_pos(lvgl_ui_->title_label, 0, 10);
+    lv_obj_set_size(lvgl_ui_->title_label, 240, 32);
+    lv_obj_set_style_text_align(lvgl_ui_->title_label, LV_TEXT_ALIGN_CENTER, 0);
+
+    lvgl_ui_->seconds_arc = lv_arc_create(lvgl_ui_->root);
+    lv_obj_remove_style_all(lvgl_ui_->seconds_arc);
+    lv_obj_add_style(lvgl_ui_->seconds_arc, &lvgl_ui_->arc_style, LV_PART_MAIN);
+    lv_obj_add_style(lvgl_ui_->seconds_arc, &lvgl_ui_->arc_indicator_style, LV_PART_INDICATOR);
+    lv_obj_set_pos(lvgl_ui_->seconds_arc, 49, 52);
+    lv_obj_set_size(lvgl_ui_->seconds_arc, 142, 142);
+    lv_arc_set_range(lvgl_ui_->seconds_arc, 0, 59);
+    lv_arc_set_value(lvgl_ui_->seconds_arc, 0);
+    lv_arc_set_rotation(lvgl_ui_->seconds_arc, 270);
+    lv_arc_set_bg_angles(lvgl_ui_->seconds_arc, 0, 360);
+    lv_obj_remove_style(lvgl_ui_->seconds_arc, nullptr, LV_PART_KNOB);
+    lv_obj_clear_flag(lvgl_ui_->seconds_arc, LV_OBJ_FLAG_CLICKABLE);
+
+    lvgl_ui_->time_label = lv_label_create(lvgl_ui_->root);
+    lv_obj_add_style(lvgl_ui_->time_label, &lvgl_ui_->time_style, 0);
+    lv_label_set_text(lvgl_ui_->time_label, "--:--");
+    lv_obj_set_pos(lvgl_ui_->time_label, 0, 91);
+    lv_obj_set_size(lvgl_ui_->time_label, 240, 58);
+    lv_obj_set_style_text_align(lvgl_ui_->time_label, LV_TEXT_ALIGN_CENTER, 0);
+
+    lvgl_ui_->date_label = lv_label_create(lvgl_ui_->root);
+    lv_obj_add_style(lvgl_ui_->date_label, &lvgl_ui_->date_style, 0);
+    lv_label_set_text(lvgl_ui_->date_label, "---- -- --");
+    lv_obj_set_pos(lvgl_ui_->date_label, 0, 148);
+    lv_obj_set_size(lvgl_ui_->date_label, 240, 24);
+    lv_obj_set_style_text_align(lvgl_ui_->date_label, LV_TEXT_ALIGN_CENTER, 0);
+
+    createStatusPill();
+    createBreathingDot();
+    std::cout << "[Display][Clock] using localtime, please ensure timezone is Asia/Shanghai\n";
+    std::cout << "[Display][LVGL] create IdleClock page\n";
+#endif
+}
+
+void DisplayDevice::updateIdleClock(bool force) {
+#if defined(RV1126B_HAS_LVGL)
+    if (!lvgl_initialized_ || lvgl_ui_ == nullptr || lvgl_ui_->time_label == nullptr ||
+        lvgl_ui_->date_label == nullptr || lvgl_ui_->status_label == nullptr ||
+        lvgl_ui_->seconds_arc == nullptr) {
+        return;
+    }
+
+    const int64_t now_ms = steadyMs();
+    if (!force && (now_ms - idle_clock_last_update_ms_) < 1000) {
+        return;
+    }
+    idle_clock_last_update_ms_ = now_ms;
+
+    std::tm tm_now{};
+    const bool time_ok = localTime(tm_now) && (tm_now.tm_year + 1900) >= 2024;
+    if (!time_ok) {
+        if (!lvgl_time_warning_printed_) {
+            std::cout << "[Display][LVGL] system time may not be synced\n";
+            lvgl_time_warning_printed_ = true;
+        }
+        lv_label_set_text(lvgl_ui_->time_label, "--:--");
+        lv_label_set_text(lvgl_ui_->date_label, "---- -- --");
+        lv_label_set_text(lvgl_ui_->status_label, "Time not synced");
+        lv_arc_set_value(lvgl_ui_->seconds_arc, 0);
+        return;
+    }
+
+    if (!force && idle_clock_last_second_ == tm_now.tm_sec) {
+        return;
+    }
+    idle_clock_last_second_ = tm_now.tm_sec;
+
+    char time_text[8]{};
+    char date_text[16]{};
+    std::snprintf(time_text, sizeof(time_text), "%02d:%02d", tm_now.tm_hour, tm_now.tm_min);
+    std::snprintf(
+        date_text,
+        sizeof(date_text),
+        "%04d-%02d-%02d",
+        tm_now.tm_year + 1900,
+        tm_now.tm_mon + 1,
+        tm_now.tm_mday);
+    lv_label_set_text(lvgl_ui_->time_label, time_text);
+    lv_label_set_text(lvgl_ui_->date_label, date_text);
+    lv_label_set_text(lvgl_ui_->status_label, "Waiting for Gesture");
+    lv_arc_set_value(lvgl_ui_->seconds_arc, tm_now.tm_sec);
+    idle_clock_visible_ = true;
+#else
+    (void)force;
+#endif
 }
 
 bool DisplayDevice::resetPanel() {
@@ -435,15 +797,21 @@ bool DisplayDevice::initPanel() {
     return true;
 }
 
-bool DisplayDevice::setAddressWindow(int x0, int y0, int x1, int y1) {
-    x0 = std::clamp(x0, 0, std::max(0, config_.st7789_width - 1));
-    y0 = std::clamp(y0, 0, std::max(0, config_.st7789_height - 1));
-    x1 = std::clamp(x1, 0, std::max(0, config_.st7789_width - 1));
-    y1 = std::clamp(y1, 0, std::max(0, config_.st7789_height - 1));
-    if (x1 < x0 || y1 < y0) {
+bool DisplayDevice::drawRgb565Area(int x, int y, int width, int height, const uint16_t* pixels) {
+    if (pixels == nullptr || width <= 0 || height <= 0) {
         return false;
     }
 
+    const int x0 = std::clamp(x, 0, std::max(0, config_.st7789_width - 1));
+    const int y0 = std::clamp(y, 0, std::max(0, config_.st7789_height - 1));
+    const int draw_width = std::min(width, config_.st7789_width - x0);
+    const int draw_height = std::min(height, config_.st7789_height - y0);
+    if (draw_width <= 0 || draw_height <= 0) {
+        return false;
+    }
+
+    const int x1 = x0 + draw_width - 1;
+    const int y1 = y0 + draw_height - 1;
     const std::array<uint8_t, 4> col = {
         static_cast<uint8_t>((x0 >> 8) & 0xFF), static_cast<uint8_t>(x0 & 0xFF),
         static_cast<uint8_t>((x1 >> 8) & 0xFF), static_cast<uint8_t>(x1 & 0xFF)
@@ -453,31 +821,24 @@ bool DisplayDevice::setAddressWindow(int x0, int y0, int x1, int y1) {
         static_cast<uint8_t>((y1 >> 8) & 0xFF), static_cast<uint8_t>(y1 & 0xFF)
     };
 
-    return writeCommand(ST7789_CASET) && writeData(col.data(), col.size()) &&
-           writeCommand(ST7789_RASET) && writeData(row.data(), row.size()) &&
-           writeCommand(ST7789_RAMWR);
-}
-
-bool DisplayDevice::flushLvglRgb565(
-    int x0,
-    int y0,
-    int x1,
-    int y1,
-    const uint8_t* pixels,
-    std::size_t length) {
-    if (pixels == nullptr || length == 0) {
-        return false;
-    }
-    if (!setAddressWindow(x0, y0, x1, y1)) {
+    if (!writeCommand(ST7789_CASET) || !writeData(col.data(), col.size()) ||
+        !writeCommand(ST7789_RASET) || !writeData(row.data(), row.size()) ||
+        !writeCommand(ST7789_RAMWR)) {
         return false;
     }
 
-    std::vector<uint8_t> big_endian(length);
-    for (std::size_t i = 0; i + 1U < length; i += 2U) {
-        big_endian[i] = pixels[i + 1U];
-        big_endian[i + 1U] = pixels[i];
+    std::vector<uint8_t> line(static_cast<std::size_t>(draw_width) * 2U);
+    for (int row_index = 0; row_index < draw_height; ++row_index) {
+        for (int col_index = 0; col_index < draw_width; ++col_index) {
+            const uint16_t color = pixels[static_cast<std::size_t>(row_index * width + col_index)];
+            line[static_cast<std::size_t>(col_index * 2)] = static_cast<uint8_t>((color >> 8) & 0xFF);
+            line[static_cast<std::size_t>(col_index * 2 + 1)] = static_cast<uint8_t>(color & 0xFF);
+        }
+        if (!writeData(line.data(), line.size())) {
+            return false;
+        }
     }
-    return writeData(big_endian.data(), big_endian.size());
+    return true;
 }
 
 bool DisplayDevice::drawRgb565Bitmap(const uint16_t* pixels, int width, int height) {
@@ -492,108 +853,9 @@ bool DisplayDevice::drawRgb565Bitmap(const uint16_t* pixels, int width, int heig
     const int x1 = x0 + draw_width - 1;
     const int y1 = y0 + draw_height - 1;
 
-    if (!setAddressWindow(x0, y0, x1, y1)) {
-        return false;
-    }
-
-    /* RGB565 高字节在前；逐行写入，避免一次性申请大临时 buffer。 */
-    std::vector<uint8_t> line(static_cast<std::size_t>(draw_width) * 2U);
-    for (int y = 0; y < draw_height; ++y) {
-        for (int x = 0; x < draw_width; ++x) {
-            const uint16_t color = pixels[static_cast<std::size_t>(y * width + x)];
-            line[static_cast<std::size_t>(x * 2)] = static_cast<uint8_t>((color >> 8) & 0xFF);
-            line[static_cast<std::size_t>(x * 2 + 1)] = static_cast<uint8_t>(color & 0xFF);
-        }
-        if (!writeData(line.data(), line.size())) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-bool DisplayDevice::openLvgl() {
-#if defined(RV1126B_HAS_LVGL)
-    lv_init();
-    g_lvgl_display_device = this;
-
-    const int width = config_.st7789_width > 0 ? config_.st7789_width : 240;
-    const int height = config_.st7789_height > 0 ? config_.st7789_height : 240;
-    const std::size_t draw_pixels = static_cast<std::size_t>(width) * 40U;
-    auto* draw_buffer = new lv_color_t[draw_pixels];
-
-#if LVGL_VERSION_MAJOR >= 9
-    lv_display_t* display = lv_display_create(width, height);
-    lv_display_set_flush_cb(display, lvglFlushCallback);
-    lv_display_set_buffers(
-        display,
-        draw_buffer,
-        nullptr,
-        draw_pixels * sizeof(lv_color_t),
-        LV_DISPLAY_RENDER_MODE_PARTIAL);
-
-    lv_obj_t* screen = lv_screen_active();
-#else
-    auto* draw_buf = new lv_disp_draw_buf_t;
-    lv_disp_draw_buf_init(draw_buf, draw_buffer, nullptr, static_cast<uint32_t>(draw_pixels));
-
-    auto* display_driver = new lv_disp_drv_t;
-    lv_disp_drv_init(display_driver);
-    display_driver->hor_res = width;
-    display_driver->ver_res = height;
-    display_driver->flush_cb = lvglFlushCallback;
-    display_driver->draw_buf = draw_buf;
-    (void)lv_disp_drv_register(display_driver);
-
-    lv_obj_t* screen = lv_scr_act();
-#endif
-    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
-    lv_obj_t* label = lv_label_create(screen);
-    lv_label_set_text(label, "LVGL OK");
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
-    lv_obj_center(label);
-    (void)lv_timer_handler();
-
-    lvgl_exit_requested_ = false;
-    lvgl_thread_ = std::thread(&DisplayDevice::lvglLoop, this);
-
-    std::cout << "[Display][LVGL] enabled\n";
-    std::cout << "[Display][LVGL] resolution=" << width << "x" << height << "\n";
-    return true;
-#else
-    std::cerr << "[Display][LVGL] disabled: built without LVGL\n";
-    return false;
-#endif
-}
-
-void DisplayDevice::closeLvgl() {
-    lvgl_exit_requested_ = true;
-    if (lvgl_thread_.joinable()) {
-        lvgl_thread_.join();
-    }
-#if defined(RV1126B_HAS_LVGL)
-    if (g_lvgl_display_device == this) {
-        g_lvgl_display_device = nullptr;
-    }
-#endif
-}
-
-void DisplayDevice::lvglLoop() {
-#if defined(RV1126B_HAS_LVGL)
-    const int tick_ms = std::max(1, config_.display_tick_ms);
-    const int refresh_ms = std::max(tick_ms, config_.display_refresh_ms);
-    int elapsed_ms = 0;
-
-    while (!lvgl_exit_requested_) {
-        sleepMs(tick_ms);
-        lv_tick_inc(static_cast<uint32_t>(tick_ms));
-        elapsed_ms += tick_ms;
-        if (elapsed_ms >= refresh_ms) {
-            (void)lv_timer_handler();
-            elapsed_ms = 0;
-        }
-    }
-#endif
+    (void)x1;
+    (void)y1;
+    return drawRgb565Area(x0, y0, draw_width, draw_height, pixels);
 }
 
 bool DisplayDevice::writeCommand(uint8_t command) {
@@ -645,10 +907,10 @@ bool DisplayDevice::writeData(const uint8_t* data, std::size_t length) {
 }
 
 bool DisplayDevice::setGpio(int gpio, bool high) {
-#ifdef __linux__
     if (gpio < 0) {
         return true;
     }
+#ifdef __linux__
     const std::string value_path = "/sys/class/gpio/gpio" + std::to_string(gpio) + "/value";
     return writeTextFile(value_path, high ? "1" : "0");
 #else

@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace rv1126b {
@@ -117,21 +116,30 @@ private:
 
 class DisplayDevice {
 public:
+    DisplayDevice();
+    ~DisplayDevice();
+
     bool open(const AppConfig& config);
+    void tick();
+    void showIdleClock();
     void showFace(DisplayFace face);
     void showHeartExpression();
-    void showSmileExpression();
-    bool flushLvglRgb565(int x0, int y0, int x1, int y1, const uint8_t* pixels, std::size_t length);
+    bool drawRgb565Area(int x, int y, int width, int height, const uint16_t* pixels);
     void close();
 
 private:
+    struct LvglUiState;
+
+    bool ensureLvglInitialized();
+    void clearLvglPage();
+    void applyThemeStyles();
+    void createIdleClockPage();
+    void createStatusPill();
+    void createBreathingDot();
+    void updateIdleClock(bool force);
     bool resetPanel();
     bool initPanel();
     bool drawRgb565Bitmap(const uint16_t* pixels, int width, int height);
-    bool setAddressWindow(int x0, int y0, int x1, int y1);
-    bool openLvgl();
-    void closeLvgl();
-    void lvglLoop();
     bool writeCommand(uint8_t command);
     bool writeData(const uint8_t* data, std::size_t length);
     bool setGpio(int gpio, bool high);
@@ -139,8 +147,14 @@ private:
     AppConfig config_;
     int spi_fd_{-1};
     bool opened_{false};
-    std::atomic<bool> lvgl_exit_requested_{false};
-    std::thread lvgl_thread_;
+    bool lvgl_initialized_{false};
+    bool lvgl_compile_warning_printed_{false};
+    bool lvgl_time_warning_printed_{false};
+    bool idle_clock_visible_{false};
+    int64_t lvgl_last_tick_ms_{0};
+    int64_t idle_clock_last_update_ms_{0};
+    int idle_clock_last_second_{-1};
+    std::unique_ptr<LvglUiState> lvgl_ui_;
 };
 
 class MqttClient {

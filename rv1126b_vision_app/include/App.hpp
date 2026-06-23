@@ -7,6 +7,7 @@
 #include "VideoPipeline.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -49,15 +50,33 @@ private:
         PostureState posture_state,
         DrinkState drink_state,
         const std::string& gesture_name);
-    void updateOverlayGesture(const GestureResult& gesture);
-    void updateOverlayPerception(
-        const PoseResult& pose,
-        const CupResult& cup,
-        const AppState& state);
-    bool applyVideoOverlay(const Frame& src, Frame& dst);
     DisplayFace selectDisplayFace(const AppState& state) const;
     bool shouldRunEncoderPipeline() const;
+    void logPerformanceIfDue();
     static int64_t nowMs();
+
+    struct PerfStat {
+        std::atomic<uint64_t> count{0};
+        std::atomic<uint64_t> total_us{0};
+
+        void addSample(uint64_t duration_us) {
+            count.fetch_add(1, std::memory_order_relaxed);
+            total_us.fetch_add(duration_us, std::memory_order_relaxed);
+        }
+    };
+
+    struct PerfCounters {
+        std::atomic<uint64_t> camera_frames{0};
+        std::atomic<uint64_t> encoder_frames{0};
+        std::atomic<uint64_t> ai_iterations{0};
+        PerfStat gesture_infer;
+        PerfStat pose_infer;
+        PerfStat cup_infer;
+        PerfStat overlay;
+        PerfStat mpp_encode;
+        PerfStat display_show;
+        std::atomic<int64_t> last_log_ms{0};
+    };
 
     AppConfig config_;
     CameraDevice camera_;
@@ -78,7 +97,7 @@ private:
     LatestFrameBuffer<FramePtr> latest_ai_frame_;
     BlockingQueue<FramePtr> encode_queue_{4, QueueOverflowPolicy::DROP_OLDEST};
     BlockingQueue<MqttMessage> mqtt_queue_{32, QueueOverflowPolicy::BLOCK};
-    BlockingQueue<DisplayFace> display_queue_{8};
+    BlockingQueue<DisplayFace> display_queue_{8, QueueOverflowPolicy::DROP_OLDEST};
 
     std::thread camera_thread_;
     std::thread encoder_thread_;
@@ -90,10 +109,7 @@ private:
     std::atomic<bool> thread_error_{false};
     std::atomic<SystemState> state_{SystemState::Idle};
     std::mutex state_mutex_;
-    std::mutex overlay_mutex_;
-    AiResultBundle latest_overlay_ai_;
-    AppState latest_overlay_state_;
-    bool overlay_runtime_enabled_{false};
+    PerfCounters perf_;
 };
 
 }  // namespace rv1126b

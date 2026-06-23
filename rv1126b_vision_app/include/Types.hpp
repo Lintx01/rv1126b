@@ -60,16 +60,15 @@ enum class DisplayFace {
     DrinkRemindFace,
     DrinkOkFace,
     GestureOkFace,
-    SmileFace,
+    IdleClock,
     SleepFace,
     ErrorFace,
-
     NORMAL_FACE = NormalFace,
     BAD_POSTURE_FACE = BadPostureFace,
     DRINK_REMIND_FACE = DrinkRemindFace,
     DRINK_OK_FACE = DrinkOkFace,
     GESTURE_OK_FACE = GestureOkFace,
-    SMILE_FACE = SmileFace,
+    IDLE_CLOCK = IdleClock,
     SLEEP_FACE = SleepFace,
     ERROR_FACE = ErrorFace
 };
@@ -107,7 +106,6 @@ struct AppConfig {
     int cup_input_height{320};
     bool use_rga_preprocess{true};
     bool fallback_to_opencv{true};
-    bool use_letterbox_preprocess{false};
 
     bool enable_mpp_encoder{true};
     bool enable_mpp_decoder{false};
@@ -153,6 +151,10 @@ struct AppConfig {
     int mqtt_keepalive_seconds{30};
     int mqtt_reconnect_delay_ms{1000};
     int mqtt_max_publish_retries{3};
+    std::string mqtt_base_topic{"rv1126b"};
+    int mqtt_status_interval_ms{1000};
+    int mqtt_telemetry_interval_ms{2000};
+    int mqtt_event_cooldown_ms{5000};
     std::string posture_alarm_topic{"rv1126b/alarm/posture"};
     std::string drink_remind_topic{"rv1126b/reminder/drink"};
     std::string result_topic{"rv1126b/vision/result"};
@@ -160,8 +162,11 @@ struct AppConfig {
 
     bool enable_display{true};
     bool enable_lvgl_display{false};
+    bool lvgl_idle_only_test{true};
     int display_tick_ms{5};
     int display_refresh_ms{20};
+    bool enable_perf_log{true};
+    int perf_log_interval_ms{2000};
     std::string st7789_spi_device{"/dev/spidev0.0"};
     int st7789_spi_speed_hz{40000000};
     int st7789_width{240};
@@ -189,7 +194,7 @@ struct EncodedPacket {
     uint64_t frame_id{0};
     PixelFormat codec{PixelFormat::H264};
     bool key_frame{false};
-    uint64_t timestamp_ms{0};
+    int64_t timestamp_ms{0};
     std::vector<uint8_t> data;
 };
 
@@ -207,19 +212,6 @@ struct CropRect {
     int y{0};
     int width{0};
     int height{0};
-};
-
-struct PreprocessTransform {
-    int source_width{0};
-    int source_height{0};
-    CropRect source_crop;
-    int model_width{0};
-    int model_height{0};
-    bool letterbox{false};
-    float scale{1.0F};
-    float pad_x{0.0F};
-    float pad_y{0.0F};
-    bool valid{false};
 };
 
 struct Point {
@@ -355,14 +347,12 @@ inline const char* toString(DisplayFace face) {
             return "drink_ok_face";
         case DisplayFace::GestureOkFace:
             return "gesture_ok_face";
+        case DisplayFace::IdleClock:
+            return "idle_clock";
         case DisplayFace::SleepFace:
             return "sleep_face";
         case DisplayFace::ErrorFace:
             return "error_face";
-        case DisplayFace::SmileFace:
-            return "SmileFace";
-        default:
-            return "UnknownFace";
     }
     return "unknown_face";
 }
@@ -379,8 +369,6 @@ inline const char* toString(GestureType type) {
             return "heart";
         case GestureType::Like:
             return "like";
-        default:
-            return "none";
     }
     return "unknown";
 }

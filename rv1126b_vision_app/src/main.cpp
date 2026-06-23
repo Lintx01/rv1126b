@@ -1,11 +1,32 @@
 #include "App.hpp"
 
-#include <iostream>
+#include <atomic>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <iostream>
+#include <thread>
 
-int main() {
+namespace {
+
+std::atomic_bool g_exit_requested{false};
+
+void handleExitSignal(int) {
+    g_exit_requested = true;
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
     rv1126b::AppConfig config;
+    bool display_only = false;
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--display-only") == 0) {
+            display_only = true;
+        }
+    }
 
     config.camera_device = "/dev/video23";
     config.frame_width = 640;
@@ -47,7 +68,6 @@ int main() {
     config.video_gop = 30;
 
     const char* preprocess_mode = std::getenv("RV_PREPROCESS_MODE");
-    const char* preprocess_geometry = std::getenv("RV_PREPROCESS_GEOMETRY");
 
     if (preprocess_mode != nullptr && std::strcmp(preprocess_mode, "rga") == 0) {
         config.use_rga_preprocess = true;
@@ -61,14 +81,6 @@ int main() {
         config.use_rga_preprocess = false;
         config.fallback_to_opencv = true;
         std::cout << "[Config] preprocess_mode=opencv(default)\n";
-    }
-
-    if (preprocess_geometry != nullptr && std::strcmp(preprocess_geometry, "letterbox") == 0) {
-        config.use_letterbox_preprocess = true;
-        std::cout << "[Config] preprocess_geometry=letterbox\n";
-    } else {
-        config.use_letterbox_preprocess = false;
-        std::cout << "[Config] preprocess_geometry=resize(default)\n";
     }
 
     config.web_stream_protocol = rv1126b::WebStreamProtocol::HttpFlv;
@@ -110,6 +122,10 @@ int main() {
     config.mqtt_keepalive_seconds = 30;
     config.mqtt_reconnect_delay_ms = 1000;
     config.mqtt_max_publish_retries = 3;
+    config.mqtt_base_topic = "rv1126b";
+    config.mqtt_status_interval_ms = 1000;
+    config.mqtt_telemetry_interval_ms = 2000;
+    config.mqtt_event_cooldown_ms = 5000;
 
     /*
      * ST7789 默认配置是占位值。
@@ -130,6 +146,28 @@ int main() {
     config.st7789_gpio_dc = 128;
     config.st7789_gpio_reset = 23;
     config.st7789_gpio_backlight = -1;
+
+    std::signal(SIGINT, handleExitSignal);
+#ifdef SIGTERM
+    std::signal(SIGTERM, handleExitSignal);
+#endif
+
+    if (display_only) {
+        std::cout << "[App] display-only mode\n";
+        config.lvgl_idle_only_test = true;
+        rv1126b::DisplayDevice display;
+        if (!display.open(config)) {
+            std::cerr << "[App] display-only open failed\n";
+            return 1;
+        }
+        display.showIdleClock();
+        while (!g_exit_requested.load()) {
+            display.tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        display.close();
+        return 0;
+    }
 
     rv1126b::VisionApp app(config);
     const int rc = app.run();

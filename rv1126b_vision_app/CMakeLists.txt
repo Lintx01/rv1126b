@@ -43,13 +43,54 @@ if (RV1126B_ENABLE_LVGL)
         message(FATAL_ERROR "LVGL requested but lv_conf.h not found.")
     endif()
 
-    file(GLOB_RECURSE RV1126B_LVGL_SOURCES CONFIGURE_DEPENDS
+    set(RV1126B_LVGL_SOURCE_GLOBS
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/core/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/display/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/indev/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/misc/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/misc/cache/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/misc/cache/class/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/misc/cache/instance/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/tick/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/osal/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/stdlib/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/stdlib/builtin/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/stdlib/clib/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/draw/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/draw/sw/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/draw/sw/blend/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/draw/sw/blend/neon/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/draw/sw/blend/arm2d/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/draw/sw/blend/helium/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/draw/convert/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/font/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/font/fmt_txt/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/themes/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/themes/default/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/themes/simple/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/themes/mono/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/layouts/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/layouts/flex/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/layouts/grid/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/libs/bin_decoder/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/widgets/label/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/widgets/arc/*.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lvgl/src/widgets/*/*.c"
     )
+
+    set(RV1126B_LVGL_SOURCES)
+    foreach(lvgl_glob IN LISTS RV1126B_LVGL_SOURCE_GLOBS)
+        file(GLOB lvgl_group_sources CONFIGURE_DEPENDS "${lvgl_glob}")
+        list(APPEND RV1126B_LVGL_SOURCES ${lvgl_group_sources})
+    endforeach()
+    list(REMOVE_DUPLICATES RV1126B_LVGL_SOURCES)
+    list(LENGTH RV1126B_LVGL_SOURCES LVGL_SOURCE_COUNT)
 
     if (NOT RV1126B_LVGL_SOURCES)
         message(FATAL_ERROR "LVGL requested but no source files found under third_party/lvgl/src.")
     endif()
+    message(STATUS "LVGL source count: ${LVGL_SOURCE_COUNT}")
 
     add_library(rv1126b_lvgl STATIC
         ${RV1126B_LVGL_SOURCES}

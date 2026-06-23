@@ -86,7 +86,7 @@
 - RKNN 输入：`RknnModel::run()` 当前固定使用 `RKNN_TENSOR_UINT8` 和 `RKNN_TENSOR_NHWC`，没有按模型 tensor 属性动态适配。
 - Gesture 后处理：`GestureModel::parseOutput()` 对分类输出做概率判断/softmax，取最大类并映射 Start/Stop/Heart。
 - Pose 后处理：`PoseModel::parseOutput()` 支持 YOLOv8-pose raw DFL 输出和 decoded tensor 输出，做 box 解码、keypoint 解析和 NMS。
-- Cup 后处理：`CupModel::parseOutput()` 支持 YOLOv8 detect raw DFL、decoded `[N,84]/[84,N]`、后处理 boxes、无 class 的 flat boxes，并只保留 COCO 饮水容器类别 `39/40/41/45`。
+- Cup 后处理：`CupModel::parseOutput()` 支持 YOLOv8 detect raw DFL、decoded `[N,84]/[84,N]`、后处理 boxes、无 class 的 flat boxes，并只保留 COCO cup class_id=41。
 - 坐标映射修正：新增 `PreprocessTransform`，AI 预处理后保存原图尺寸、crop 区域和模型输入尺寸。`PoseModel` / `CupModel` 输出仍先按模型输入坐标解析，随后在 `App::aiLoop()` 内反变换回原始帧坐标。
 - 饮水判断坐标系：`DrinkDetector::update()` 现在接收已经反变换后的 pose/cup 结果，因此“杯子中心到鼻子/头点距离”的逻辑判断使用原图坐标；网页叠框也可复用同一批原图坐标。
 - 仍需注意：当前预处理是直接 resize，不是 letterbox；因此反变换按 `crop + x/y 独立 scale` 计算。若后续改成 YOLO 常见 letterbox，需要在 `PreprocessTransform` 中增加 padding 信息。
