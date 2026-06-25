@@ -55,6 +55,14 @@ std::string fourccToString(uint32_t fourcc) {
     return std::string(s);
 }
 
+double fpsFromTimePerFrame(const v4l2_fract& time_per_frame) {
+    if (time_per_frame.numerator == 0 || time_per_frame.denominator == 0) {
+        return 0.0;
+    }
+    return static_cast<double>(time_per_frame.denominator) /
+           static_cast<double>(time_per_frame.numerator);
+}
+
 #endif
 
 }  // namespace
@@ -153,6 +161,57 @@ bool CameraDevice::open(const AppConfig& config) {
 
     config_.frame_width = static_cast<int>(format.fmt.pix_mp.width);
     config_.frame_height = static_cast<int>(format.fmt.pix_mp.height);
+
+    if (config_.target_fps > 0) {
+        v4l2_streamparm parm{};
+        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+
+        if (xioctl(impl_->fd, VIDIOC_G_PARM, &parm) == 0) {
+            std::cout << "[Camera][FPS] before set: actual_fps="
+                      << fpsFromTimePerFrame(parm.parm.capture.timeperframe)
+                      << ", timeperframe="
+                      << parm.parm.capture.timeperframe.numerator << "/"
+                      << parm.parm.capture.timeperframe.denominator
+                      << ", capability=0x" << std::hex << parm.parm.capture.capability
+                      << std::dec << "\n";
+        } else {
+            std::cerr << "[Camera][FPS][WARN] VIDIOC_G_PARM before set failed, errno="
+                      << errno << ", msg=" << std::strerror(errno) << "\n";
+        }
+
+        parm = {};
+        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        parm.parm.capture.timeperframe.numerator = 1;
+        parm.parm.capture.timeperframe.denominator =
+            static_cast<uint32_t>(config_.target_fps);
+
+        if (xioctl(impl_->fd, VIDIOC_S_PARM, &parm) == 0) {
+            std::cout << "[Camera][FPS] request_fps=" << config_.target_fps
+                      << ", driver_return_fps="
+                      << fpsFromTimePerFrame(parm.parm.capture.timeperframe)
+                      << ", timeperframe="
+                      << parm.parm.capture.timeperframe.numerator << "/"
+                      << parm.parm.capture.timeperframe.denominator << "\n";
+        } else {
+            std::cerr << "[Camera][FPS][WARN] VIDIOC_S_PARM request_fps="
+                      << config_.target_fps
+                      << " failed, errno=" << errno
+                      << ", msg=" << std::strerror(errno) << "\n";
+        }
+
+        parm = {};
+        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        if (xioctl(impl_->fd, VIDIOC_G_PARM, &parm) == 0) {
+            std::cout << "[Camera][FPS] after set: actual_fps="
+                      << fpsFromTimePerFrame(parm.parm.capture.timeperframe)
+                      << ", timeperframe="
+                      << parm.parm.capture.timeperframe.numerator << "/"
+                      << parm.parm.capture.timeperframe.denominator << "\n";
+        } else {
+            std::cerr << "[Camera][FPS][WARN] VIDIOC_G_PARM after set failed, errno="
+                      << errno << ", msg=" << std::strerror(errno) << "\n";
+        }
+    }
 
     const std::size_t expected_nv12_bytes =
         static_cast<std::size_t>(config_.frame_width) *

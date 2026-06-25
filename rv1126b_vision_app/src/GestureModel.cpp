@@ -35,15 +35,15 @@ const char* gestureClassLabel(std::size_t class_id) {
         case 9:
             return "数字9";
         case 10:
-            return "停止";
+            return "ok";
         case 11:
-            return "启动";
-        case 12:
             return "比心";
+        case 12:
+            return "rock u";
         case 13:
             return "点赞";
         case 14:
-            return "爱你";
+            return "pink";
         default:
             return "未知手势";
     }
@@ -117,7 +117,7 @@ bool GestureModel::load(const AppConfig& config) {
               << (config.gesture_model_path.empty() ? "<pending>" : config.gesture_model_path)
               << ", mode=" << (fallback_mode_ ? "fallback" : "rknn") << "\n";
     std::cout << "[阈值][手势] 触发动作要求：top1_prob >= " << score_threshold_
-              << "，且 class 属于 10/11/12/13\n";
+              << "，且 class 属于 5/6/12/13\n";
     return true;
 }
 
@@ -151,8 +151,8 @@ GestureResult GestureModel::parseOutput(
     const std::vector<std::vector<float>>& outputs) const {
     constexpr std::size_t kGestureClassCount = 15;
 
-    constexpr std::size_t kStartClassId = 11;
-    constexpr std::size_t kStopClassId = 10;
+    constexpr std::size_t kStartClassId = 5;
+    constexpr std::size_t kStopClassId = 6;
     constexpr std::size_t kHeartClassId = 12;
     constexpr std::size_t kLikeClassId = 13;
 

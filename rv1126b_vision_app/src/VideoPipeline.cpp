@@ -1,6 +1,7 @@
 #include "VideoPipeline.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <iostream>
@@ -495,6 +496,79 @@ bool ImageProcessor::cropResize(const Frame& src, const CropRect& crop, int dst_
     }
 
     return cropResizeBySoftware(src, crop, dst_width, dst_height, dst);
+}
+
+bool ImageProcessor::letterbox(
+    const Frame& src,
+    const CropRect& crop,
+    int dst_width,
+    int dst_height,
+    Frame& dst) {
+    if (!opened_ || src.data.empty() || src.width <= 0 || src.height <= 0 ||
+        dst_width <= 0 || dst_height <= 0) {
+        return false;
+    }
+
+    const CropRect normalized = normalizeCrop(src, crop);
+    const float scale = std::min(
+        static_cast<float>(dst_width) / static_cast<float>(normalized.width),
+        static_cast<float>(dst_height) / static_cast<float>(normalized.height));
+    const int resized_width = std::clamp(
+        static_cast<int>(std::round(normalized.width * scale)),
+        1,
+        dst_width);
+    const int resized_height = std::clamp(
+        static_cast<int>(std::round(normalized.height * scale)),
+        1,
+        dst_height);
+    const int pad_x = (dst_width - resized_width) / 2;
+    const int pad_y = (dst_height - resized_height) / 2;
+
+    Frame resized;
+    if (!cropResize(src, normalized, resized_width, resized_height, resized)) {
+        return false;
+    }
+    if (resized.format != PixelFormat::RGB888 || resized.channels < 3) {
+        std::cerr << "[ImageProcessor] letterbox expects RGB888 resized frame\n";
+        return false;
+    }
+
+    dst.id = src.id;
+    dst.width = dst_width;
+    dst.height = dst_height;
+    dst.channels = 3;
+    dst.format = PixelFormat::RGB888;
+    dst.timestamp_ms = src.timestamp_ms;
+    dst.data.assign(
+        static_cast<std::size_t>(dst_width) *
+            static_cast<std::size_t>(dst_height) * 3U,
+        114U);
+
+    for (int y = 0; y < resized_height; ++y) {
+        const std::size_t src_offset =
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(resized_width) * 3U;
+        const std::size_t dst_offset =
+            static_cast<std::size_t>(pad_y + y) *
+                static_cast<std::size_t>(dst_width) * 3U +
+            static_cast<std::size_t>(pad_x) * 3U;
+        std::memcpy(
+            dst.data.data() + dst_offset,
+            resized.data.data() + src_offset,
+            static_cast<std::size_t>(resized_width) * 3U);
+    }
+
+    static int letterbox_log_count = 0;
+    if (letterbox_log_count < 3) {
+        std::cout << "[ImageProcessor] letterbox ok, src="
+                  << normalized.width << "x" << normalized.height
+                  << ", resized=" << resized_width << "x" << resized_height
+                  << ", pad=(" << pad_x << "," << pad_y << ")"
+                  << ", dst=" << dst_width << "x" << dst_height << "\n";
+        ++letterbox_log_count;
+    }
+
+    return true;
 }
 
 void ImageProcessor::close() {

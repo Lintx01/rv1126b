@@ -151,6 +151,41 @@ std::string scheduledModelList(const AiScheduleDecision& decision) {
     return oss.str();
 }
 
+void logStateTransition(SystemState from, SystemState to, const char* reason) {
+    std::cout << "\n"
+              << "==================== [状态机转移] ====================\n"
+              << "状态: " << toChineseString(from) << "(" << toString(from) << ")"
+              << " -> " << toChineseString(to) << "(" << toString(to) << ")\n"
+              << "原因: " << (reason == nullptr ? "unknown" : reason) << "\n"
+              << "======================================================\n";
+}
+
+const char* postureStateLabel(PostureState state) {
+    switch (state) {
+        case PostureState::Unknown:
+            return "未知";
+        case PostureState::Good:
+            return "正常";
+        case PostureState::BadPending:
+            return "疑似异常";
+        case PostureState::BadAlert:
+            return "坐姿异常";
+    }
+    return "未知";
+}
+
+const char* drinkStateLabel(DrinkState state) {
+    switch (state) {
+        case DrinkState::Normal:
+            return "正常";
+        case DrinkState::NeedRemind:
+            return "需要提醒";
+        case DrinkState::DrinkDetected:
+            return "检测到喝水";
+    }
+    return "未知";
+}
+
 bool shouldPublishCooldownEvent(const AppConfig& config, const std::string& event_name) {
     const int64_t now_ms = steadyMs();
     const int64_t cooldown_ms = std::max<int64_t>(0, config.mqtt_event_cooldown_ms);
@@ -591,6 +626,15 @@ void VisionApp::aiLoop() {
             }
             return true;
         };
+        auto preprocessLetterboxInput = [&](const char* model_name, int width, int height, Frame& output) {
+            if (!image_processor_.letterbox(*frame, full_frame_crop, width, height, output)) {
+                std::cerr << "[AI] image letterbox failed, model=" << model_name
+                          << ", frame=" << frame->id
+                          << ", input=" << width << "x" << height << "\n";
+                return false;
+            }
+            return true;
+        };
 
         if (decision.run_gesture) {
             Frame gesture_input;
@@ -602,7 +646,8 @@ void VisionApp::aiLoop() {
                 std::cerr << "[AI] skip gesture inference, frame=" << frame->id << "\n";
             } else {
                 std::cout << "[AI][模型] 调用 gesture(手势), frame=" << gesture_input.id
-                          << ", input=" << gesture_input.width << "x" << gesture_input.height << "\n";
+                          << ", input=" << gesture_input.width << "x" << gesture_input.height
+                          << ", preprocess=resize\n";
 
                 GestureResult gesture_result;
                 const auto gesture_begin = std::chrono::steady_clock::now();
@@ -643,7 +688,6 @@ void VisionApp::aiLoop() {
                     }
                     case GestureType::Like:
                     {
-                        std::cout << "[Gesture] like accepted\n";
                         queueMqttEvent(
                             config_,
                             mqtt_queue_,
@@ -676,7 +720,7 @@ void VisionApp::aiLoop() {
         if (config_.use_three_model_pipeline) {
             if (decision.run_pose) {
                 Frame pose_input;
-                if (!preprocessInput(
+                if (!preprocessLetterboxInput(
                         "pose",
                         config_.pose_input_width,
                         config_.pose_input_height,
@@ -690,7 +734,8 @@ void VisionApp::aiLoop() {
                     has_pose_result = true;
                 } else {
                     std::cout << "[AI][模型] 调用 pose(姿态), frame=" << pose_input.id
-                              << ", input=" << pose_input.width << "x" << pose_input.height << "\n";
+                              << ", input=" << pose_input.width << "x" << pose_input.height
+                              << ", preprocess=letterbox\n";
                     const auto pose_begin = std::chrono::steady_clock::now();
                     try {
                         last_pose_result = pose_model_.infer(pose_input);
@@ -711,14 +756,16 @@ void VisionApp::aiLoop() {
                     }
                     perf_.pose_infer.addSample(elapsedUs(pose_begin));
                     has_pose_result = true;
-                    std::cout << "[AI][结果] pose(姿态) valid=" << (last_pose_result.valid ? "true" : "false")
-                              << ", message=" << last_pose_result.message << "\n";
+                    std::cout << "[核心][pose] valid=" << (last_pose_result.valid ? "true" : "false")
+                              << ", has_person=" << (last_pose_result.has_person ? "true" : "false")
+                              << ", person_score=" << last_pose_result.person_score
+                              << ", frame=" << last_pose_result.frame_id << "\n";
                 }
             }
 
             if (decision.run_cup) {
                 Frame cup_input;
-                if (!preprocessInput(
+                if (!preprocessLetterboxInput(
                         "cup",
                         config_.cup_input_width,
                         config_.cup_input_height,
@@ -732,7 +779,8 @@ void VisionApp::aiLoop() {
                     has_cup_result = true;
                 } else {
                     std::cout << "[AI][模型] 调用 cup(饮品), frame=" << cup_input.id
-                              << ", input=" << cup_input.width << "x" << cup_input.height << "\n";
+                              << ", input=" << cup_input.width << "x" << cup_input.height
+                              << ", preprocess=letterbox\n";
                     const auto cup_begin = std::chrono::steady_clock::now();
                     try {
                         last_cup_result = cup_model_.infer(cup_input);
@@ -753,8 +801,9 @@ void VisionApp::aiLoop() {
                     }
                     perf_.cup_infer.addSample(elapsedUs(cup_begin));
                     has_cup_result = true;
-                    std::cout << "[AI][结果] cup(饮品) valid=" << (last_cup_result.valid ? "true" : "false")
-                              << ", message=" << last_cup_result.message << "\n";
+                    std::cout << "[核心][cup] valid=" << (last_cup_result.valid ? "true" : "false")
+                              << ", cups=" << last_cup_result.cups.size()
+                              << ", frame=" << last_cup_result.frame_id << "\n";
                 }
             }
 
@@ -765,9 +814,20 @@ void VisionApp::aiLoop() {
             if (has_valid_three_model_result) {
                 if (has_pose_result) {
                     posture_state = posture_analyzer_.update(last_pose_result);
+                    std::cout << "[核心][坐姿判断] posture_state=" << toString(posture_state)
+                              << "(" << postureStateLabel(posture_state) << ")"
+                              << ", pose_valid=" << (last_pose_result.valid ? "true" : "false")
+                              << ", has_person=" << (last_pose_result.has_person ? "true" : "false")
+                              << "\n";
                 }
                 if (has_pose_result && has_cup_result) {
                     drink_state = drink_detector_.update(last_pose_result, last_cup_result);
+                    std::cout << "[核心][喝水判断] drink_state=" << toString(drink_state)
+                              << "(" << drinkStateLabel(drink_state) << ")"
+                              << ", pose_valid=" << (last_pose_result.valid ? "true" : "false")
+                              << ", cup_valid=" << (last_cup_result.valid ? "true" : "false")
+                              << ", cups=" << last_cup_result.cups.size()
+                              << "\n";
                 }
                 result = composeVisionResult(last_pose_result, last_cup_result, posture_state, drink_state);
                 result.message += ",pipeline=three_model";
@@ -791,7 +851,7 @@ void VisionApp::aiLoop() {
                         PostureState::UNKNOWN,
                         DrinkState::NORMAL);
                     result.message += ",pipeline=three_model_invalid";
-                    std::cout << "[AI][结果] 三模型输出无有效结果，保持 posture=UNKNOWN/drink=NORMAL, frame="
+                    std::cout << "[核心][判断] 三模型输出无有效结果，保持 posture=UNKNOWN/drink=NORMAL, frame="
                               << frame->id << "\n";
                     has_result_to_publish = true;
                 }
@@ -889,22 +949,24 @@ void VisionApp::displayLoop() {
 void VisionApp::requestStartByGesture() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (state_.load() == SystemState::Idle) {
+        const SystemState from = state_.load();
         state_ = SystemState::Running;
         drink_detector_.reset();
         ai_scheduler_.reset();
-        std::cout << "[状态机] 空闲(Idle) -> 运行中(Running)，触发来源=gesture(start)\n";
+        logStateTransition(from, SystemState::Running, "gesture(start)");
     }
 }
 
 void VisionApp::requestStopByGesture() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (state_.load() == SystemState::Running) {
+        const SystemState from = state_.load();
         state_ = SystemState::Stopping;
-        std::cout << "[状态机] 运行中(Running) -> 停止中(Stopping)，触发来源=gesture(stop)\n";
+        logStateTransition(from, SystemState::Stopping, "gesture(stop)");
         state_ = SystemState::Idle;
         drink_detector_.reset();
         ai_scheduler_.reset();
-        std::cout << "[状态机] 停止中(Stopping) -> 空闲(Idle)\n";
+        logStateTransition(SystemState::Stopping, SystemState::Idle, "stop complete");
     }
 }
 
@@ -1003,7 +1065,7 @@ void VisionApp::publishDisplayState(
     updateLatestMqttAppState(state);
 
     if (!display_queue_.push(state.display_face)) {
-        std::cerr << "[显示状态][WARN] 显示队列已满，丢弃表情 face="
+        std::cerr << "[下游][WARN] 显示队列已满，丢弃表情 face="
                   << static_cast<int>(state.display_face)
                   << ", frame_id=" << state.frame_id << "\n";
     }
@@ -1020,19 +1082,6 @@ void VisionApp::publishDisplayState(
         }
     }
 
-    const SystemState current_state = state_.load();
-    std::cout << "[显示状态] frame_id=" << state.frame_id
-              << ", 状态机=" << toChineseString(current_state)
-              << "(" << toString(current_state) << ")"
-              << ", gesture=" << (state.gesture_name.empty() ? "<none>" : state.gesture_name)
-              << ", device_mode=" << toString(state.device_mode)
-              << "(" << static_cast<int>(state.device_mode) << ")"
-              << ", posture_state=" << toString(state.posture_state)
-              << "(" << static_cast<int>(state.posture_state) << ")"
-              << ", drink_state=" << toString(state.drink_state)
-              << "(" << static_cast<int>(state.drink_state) << ")"
-              << ", display_face=" << toString(state.display_face)
-              << "(" << static_cast<int>(state.display_face) << ")\n";
 }
 
 DisplayFace VisionApp::selectDisplayFace(const AppState& state) const {

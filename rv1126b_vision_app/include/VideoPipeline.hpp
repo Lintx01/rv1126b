@@ -41,6 +41,7 @@ class ImageProcessor {
 public:
     bool open(const AppConfig& config);
     bool cropResize(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst);
+    bool letterbox(const Frame& src, const CropRect& crop, int dst_width, int dst_height, Frame& dst);
     void close();
 
 private:
