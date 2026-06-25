@@ -889,6 +889,8 @@ bool PoseModel::load(const AppConfig& config) {
     std::cout << "[PoseModel] load: "
               << (config.pose_model_path.empty() ? "<pending>" : config.pose_model_path)
               << ", mode=" << (fallback_mode_ ? "stub" : "rknn") << "\n";
+    std::cout << "[阈值][姿态模型] person_score >= " << kPoseScoreThreshold
+              << " 才进入人体候选，NMS IoU=" << kPoseNmsThreshold << "\n";
     return true;
 }
 
@@ -1008,6 +1010,9 @@ bool CupModel::load(const AppConfig& config) {
     std::cout << "[CupModel] load: "
               << (config.cup_model_path.empty() ? "<pending>" : config.cup_model_path)
               << ", mode=" << (fallback_mode_ ? "stub" : "rknn") << "\n";
+    std::cout << "[阈值][饮品模型] class_ids=" << drinkClassIdsForLog()
+              << ", score >= " << config.cup_score_threshold
+              << " 才进入候选，NMS IoU=" << kCupNmsThreshold << "\n";
     return true;
 }
 
@@ -1161,8 +1166,8 @@ CupResult CupModel::fallbackInfer(const Frame& frame) const {
 
 void PostureAnalyzer::configure(const AppConfig& config) {
     keypoint_score_threshold_ = config.pose_keypoint_score_threshold;
-    std::cout << "[PostureAnalyzer] front45 rules ready, keypoint_threshold="
-              << keypoint_score_threshold_ << "\n";
+    std::cout << "[阈值][坐姿事件] keypoint_score >= " << keypoint_score_threshold_
+              << "；头前伸角 >= 35 判 HEAD_FORWARD；低头角 >= 15 判 HEAD_DOWN；后仰角 <= -15 判 HEAD_BACKWARD\n";
 }
 
 PostureState PostureAnalyzer::update(const PoseResult& pose) {
@@ -1191,10 +1196,9 @@ void DrinkDetector::configure(const AppConfig& config) {
     drink_distance_norm_threshold_ = config.drink_distance_norm_threshold;
     drink_consecutive_hits_ = std::max(1, config.drink_consecutive_hits);
     consecutive_hits_ = 0;
-    std::cout << "[DrinkDetector] distance rules ready, keypoint_threshold="
-              << keypoint_score_threshold_
-              << ", norm_threshold=" << drink_distance_norm_threshold_
-              << ", consecutive_hits=" << drink_consecutive_hits_ << "\n";
+    std::cout << "[阈值][喝水事件] keypoint_score >= " << keypoint_score_threshold_
+              << "；杯子到头部归一化距离 <= " << drink_distance_norm_threshold_
+              << " 连续 " << drink_consecutive_hits_ << " 次判 DRINK_DETECTED；有杯但距离更远判 NEED_REMIND\n";
 }
 
 DrinkState DrinkDetector::update(const PoseResult& pose, const CupResult& cups) {

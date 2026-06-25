@@ -305,6 +305,11 @@ bool VisionApp::start() {
                   << config_.gesture_interval_ms << "/"
                   << config_.pose_interval_ms << "/"
                   << config_.cup_interval_ms << "\n";
+        std::cout << "[阈值][总览] gesture_prob=" << config_.gesture_score_threshold
+                  << ", cup_score=" << config_.cup_score_threshold
+                  << ", pose_keypoint=" << config_.pose_keypoint_score_threshold
+                  << ", drink_distance_norm=" << config_.drink_distance_norm_threshold
+                  << ", drink_consecutive_hits=" << config_.drink_consecutive_hits << "\n";
 
         if (!image_processor_.open(config_)) {
             throw std::runtime_error("image processor open failed");

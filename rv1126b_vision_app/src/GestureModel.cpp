@@ -116,6 +116,8 @@ bool GestureModel::load(const AppConfig& config) {
     std::cout << "[GestureModel] load: "
               << (config.gesture_model_path.empty() ? "<pending>" : config.gesture_model_path)
               << ", mode=" << (fallback_mode_ ? "fallback" : "rknn") << "\n";
+    std::cout << "[阈值][手势] 触发动作要求：top1_prob >= " << score_threshold_
+              << "，且 class 属于 10/11/12/13\n";
     return true;
 }
 
@@ -203,7 +205,6 @@ GestureResult GestureModel::parseOutput(
         static_cast<std::size_t>(std::distance(probs.begin(), best));
 
     const float best_prob = *best;
-    const float best_logit = logits[class_id];
 
     result.score = best_prob;
     result.gesture_name = "class_" + std::to_string(class_id);
@@ -219,42 +220,9 @@ GestureResult GestureModel::parseOutput(
         mapped_type = GestureType::Like;
     }
 
-    std::vector<std::pair<float, std::size_t>> ranked;
-    ranked.reserve(kGestureClassCount);
-    for (std::size_t i = 0; i < kGestureClassCount; ++i) {
-        ranked.emplace_back(probs[i], i);
-    }
-
-    std::sort(
-        ranked.begin(),
-        ranked.end(),
-        [](const auto& a, const auto& b) {
-            return a.first > b.first;
-        });
-
-    static int debug_count = 0;
-    ++debug_count;
-
-    // 先每次都打印，方便你排查。确认稳定后可以改成 debug_count % 10 == 0。
     std::cout << "[手势识别] frame=" << frame.id
               << ", top1=class_" << class_id << "(" << gestureClassLabel(class_id) << ")"
-              << ", prob=" << best_prob
-              << ", logit=" << best_logit
-              << ", threshold=" << score_threshold_
-              << ", 映射动作=" << gestureActionLabel(mapped_type)
-              << ", 是否触发=" << (best_prob >= score_threshold_ && mapped_type != GestureType::None ? "是" : "否")
-              << ", top5=";
-
-    for (std::size_t i = 0; i < std::min<std::size_t>(5, ranked.size()); ++i) {
-        std::cout << "class_" << ranked[i].second
-                  << "(" << gestureClassLabel(ranked[i].second) << ")"
-                  << ":" << ranked[i].first;
-        if (i + 1 < std::min<std::size_t>(5, ranked.size())) {
-            std::cout << ",";
-        }
-    }
-
-    std::cout << "\n";
+              << "\n";
 
     if (best_prob < score_threshold_) {
         return result;
@@ -262,13 +230,10 @@ GestureResult GestureModel::parseOutput(
 
     result.type = mapped_type;
 
-    std::cout << "[手势识别] 达到阈值，class_id=" << class_id
-              << "(" << gestureClassLabel(class_id) << ")"
-              << ", gesture_name=" << result.gesture_name
-              << ", prob=" << best_prob
-              << ", mapped=" << toString(result.type)
-              << "(" << gestureActionLabel(result.type) << ")"
-              << "\n";
+    if (result.type != GestureType::None) {
+        std::cout << "[手势事件] " << gestureActionLabel(result.type)
+                  << "，class_" << class_id << "(" << gestureClassLabel(class_id) << ")\n";
+    }
 
     return result;
 }
