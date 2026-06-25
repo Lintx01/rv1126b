@@ -434,6 +434,8 @@ void DisplayDevice::close() {
 #endif
     opened_ = false;
     lvgl_initialized_ = false;
+    lvgl_time_warning_printed_ = false;
+    lvgl_time_status_printed_ = false;
     idle_clock_visible_ = false;
     idle_clock_last_second_ = -1;
     idle_clock_last_update_ms_ = 0;
@@ -749,6 +751,12 @@ void DisplayDevice::updateIdleClock(bool force) {
         tm_now.tm_year + 1900,
         tm_now.tm_mon + 1,
         tm_now.tm_mday);
+    if (!lvgl_time_status_printed_) {
+        std::cout << "[Display][Clock] 当前计算北京时间=" << date_text << " " << time_text
+                  << ":" << (tm_now.tm_sec < 10 ? "0" : "") << tm_now.tm_sec
+                  << ", offset_minutes=" << config_.display_timezone_offset_minutes << "\n";
+        lvgl_time_status_printed_ = true;
+    }
     lv_label_set_text(lvgl_ui_->time_label, time_text);
     lv_label_set_text(lvgl_ui_->date_label, date_text);
     lv_label_set_text(lvgl_ui_->status_label, "Waiting for Gesture");

@@ -12,6 +12,59 @@ namespace rv1126b {
 
 namespace {
 
+const char* gestureClassLabel(std::size_t class_id) {
+    switch (class_id) {
+        case 0:
+            return "数字0";
+        case 1:
+            return "数字1";
+        case 2:
+            return "数字2";
+        case 3:
+            return "数字3";
+        case 4:
+            return "数字4";
+        case 5:
+            return "数字5";
+        case 6:
+            return "数字6";
+        case 7:
+            return "数字7";
+        case 8:
+            return "数字8";
+        case 9:
+            return "数字9";
+        case 10:
+            return "停止";
+        case 11:
+            return "启动";
+        case 12:
+            return "比心";
+        case 13:
+            return "点赞";
+        case 14:
+            return "爱你";
+        default:
+            return "未知手势";
+    }
+}
+
+const char* gestureActionLabel(GestureType type) {
+    switch (type) {
+        case GestureType::None:
+            return "不触发动作";
+        case GestureType::Start:
+            return "启动";
+        case GestureType::Stop:
+            return "停止";
+        case GestureType::Heart:
+            return "比心";
+        case GestureType::Like:
+            return "点赞";
+    }
+    return "未知动作";
+}
+
 bool looksLikeProbability(const std::vector<float>& values) {
     if (values.empty()) {
         return false;
@@ -155,6 +208,17 @@ GestureResult GestureModel::parseOutput(
     result.score = best_prob;
     result.gesture_name = "class_" + std::to_string(class_id);
 
+    GestureType mapped_type = GestureType::None;
+    if (class_id == kStartClassId) {
+        mapped_type = GestureType::Start;
+    } else if (class_id == kStopClassId) {
+        mapped_type = GestureType::Stop;
+    } else if (class_id == kHeartClassId) {
+        mapped_type = GestureType::Heart;
+    } else if (class_id == kLikeClassId) {
+        mapped_type = GestureType::Like;
+    }
+
     std::vector<std::pair<float, std::size_t>> ranked;
     ranked.reserve(kGestureClassCount);
     for (std::size_t i = 0; i < kGestureClassCount; ++i) {
@@ -172,15 +236,18 @@ GestureResult GestureModel::parseOutput(
     ++debug_count;
 
     // 先每次都打印，方便你排查。确认稳定后可以改成 debug_count % 10 == 0。
-    std::cout << "[GestureScores] frame=" << frame.id
-              << ", top1=class_" << class_id
+    std::cout << "[手势识别] frame=" << frame.id
+              << ", top1=class_" << class_id << "(" << gestureClassLabel(class_id) << ")"
               << ", prob=" << best_prob
               << ", logit=" << best_logit
               << ", threshold=" << score_threshold_
+              << ", 映射动作=" << gestureActionLabel(mapped_type)
+              << ", 是否触发=" << (best_prob >= score_threshold_ && mapped_type != GestureType::None ? "是" : "否")
               << ", top5=";
 
     for (std::size_t i = 0; i < std::min<std::size_t>(5, ranked.size()); ++i) {
         std::cout << "class_" << ranked[i].second
+                  << "(" << gestureClassLabel(ranked[i].second) << ")"
                   << ":" << ranked[i].first;
         if (i + 1 < std::min<std::size_t>(5, ranked.size())) {
             std::cout << ",";
@@ -193,22 +260,14 @@ GestureResult GestureModel::parseOutput(
         return result;
     }
 
-    if (class_id == kStartClassId) {
-        result.type = GestureType::Start;
-    } else if (class_id == kStopClassId) {
-        result.type = GestureType::Stop;
-    } else if (class_id == kHeartClassId) {
-        result.type = GestureType::Heart;
-    } else if (class_id == kLikeClassId) {
-        result.type = GestureType::Like;
-    } else {
-        result.type = GestureType::None;
-    }
+    result.type = mapped_type;
 
-    std::cout << "[GestureModel] class_id=" << class_id
+    std::cout << "[手势识别] 达到阈值，class_id=" << class_id
+              << "(" << gestureClassLabel(class_id) << ")"
               << ", gesture_name=" << result.gesture_name
               << ", prob=" << best_prob
               << ", mapped=" << toString(result.type)
+              << "(" << gestureActionLabel(result.type) << ")"
               << "\n";
 
     return result;

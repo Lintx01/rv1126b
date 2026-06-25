@@ -87,6 +87,30 @@ enum class WebStreamProtocol {
     HttpFlv
 };
 
+inline const char* toString(SystemState state) {
+    switch (state) {
+        case SystemState::Idle:
+            return "Idle";
+        case SystemState::Running:
+            return "Running";
+        case SystemState::Stopping:
+            return "Stopping";
+    }
+    return "Unknown";
+}
+
+inline const char* toChineseString(SystemState state) {
+    switch (state) {
+        case SystemState::Idle:
+            return "空闲";
+        case SystemState::Running:
+            return "运行中";
+        case SystemState::Stopping:
+            return "停止中";
+    }
+    return "未知";
+}
+
 struct AppConfig {
     std::string camera_device{"/dev/video0"};
     int frame_width{640};

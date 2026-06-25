@@ -150,6 +150,7 @@ private:
     bool lvgl_initialized_{false};
     bool lvgl_compile_warning_printed_{false};
     bool lvgl_time_warning_printed_{false};
+    bool lvgl_time_status_printed_{false};
     bool idle_clock_visible_{false};
     int64_t lvgl_last_tick_ms_{0};
     int64_t idle_clock_last_update_ms_{0};
