@@ -111,6 +111,68 @@ Box makeBoxFromCenter(float center_x, float center_y, float width, float height,
         frame_height);
 }
 
+Point inverseTransformPoint(const Point& point, const Frame& frame) {
+    if (!frame.transform.letterboxed || frame.transform.scale <= 0.0F) {
+        return point;
+    }
+
+    const float source_width = static_cast<float>(std::max(1, frame.transform.source_width));
+    const float source_height = static_cast<float>(std::max(1, frame.transform.source_height));
+    return Point{
+        std::clamp(
+            (point.x - frame.transform.pad_x) / frame.transform.scale +
+                static_cast<float>(frame.transform.crop_x),
+            0.0F,
+            source_width - 1.0F),
+        std::clamp(
+            (point.y - frame.transform.pad_y) / frame.transform.scale +
+                static_cast<float>(frame.transform.crop_y),
+            0.0F,
+            source_height - 1.0F)
+    };
+}
+
+Box inverseTransformBox(const Box& box, const Frame& frame) {
+    if (!frame.transform.letterboxed || frame.transform.scale <= 0.0F) {
+        return box;
+    }
+
+    const Point p0 = inverseTransformPoint(Point{box.x, box.y}, frame);
+    const Point p1 = inverseTransformPoint(Point{box.x + box.w, box.y + box.h}, frame);
+    Box transformed;
+    transformed.x = p0.x;
+    transformed.y = p0.y;
+    transformed.w = std::max(1.0F, p1.x - p0.x);
+    transformed.h = std::max(1.0F, p1.y - p0.y);
+    transformed.score = box.score;
+    transformed.label = box.label;
+    return transformed;
+}
+
+void inverseTransformPoseResult(PoseResult& result, const Frame& frame) {
+    if (!frame.transform.letterboxed || frame.transform.scale <= 0.0F) {
+        return;
+    }
+
+    result.person_box = inverseTransformBox(result.person_box, frame);
+    for (auto& keypoint : result.keypoints) {
+        const Point point = inverseTransformPoint(Point{keypoint.x, keypoint.y}, frame);
+        keypoint.x = point.x;
+        keypoint.y = point.y;
+    }
+}
+
+void inverseTransformCupResult(CupResult& result, const Frame& frame) {
+    if (!frame.transform.letterboxed || frame.transform.scale <= 0.0F) {
+        return;
+    }
+
+    result.cup_box = inverseTransformBox(result.cup_box, frame);
+    for (auto& cup : result.cups) {
+        cup = inverseTransformBox(cup, frame);
+    }
+}
+
 float sigmoid(float value) {
     return 1.0F / (1.0F + std::exp(-value));
 }
@@ -281,7 +343,20 @@ void appendCupDetection(
 
     DetectionCandidate candidate;
     candidate.box = box;
-    candidate.box.label = "cup";
+    switch (class_id) {
+        case 39:
+            candidate.box.label = "bottle(class_39)";
+            break;
+        case 40:
+            candidate.box.label = "wine_glass(class_40)";
+            break;
+        case 41:
+            candidate.box.label = "cup(class_41)";
+            break;
+        default:
+            candidate.box.label = "cup(class_unknown)";
+            break;
+    }
     candidate.box.score = score;
     candidate.class_id = class_id;
     candidate.score = score;
@@ -985,10 +1060,12 @@ PoseResult PoseModel::parseOutput(const Frame& frame, const std::vector<std::vec
     result = kept.front();
     result.frame_id = frame.id;
     result.timestamp_ms = frame.timestamp_ms;
+    inverseTransformPoseResult(result, frame);
     std::ostringstream oss;
     oss << (used_raw_decoder ? "pose_yolov8_raw_dfl_decoder" : "pose_yolov8_decoded_tensor")
         << ",kept_after_nms=" << kept.size()
-        << ",person_score=" << result.person_score;
+        << ",person_score=" << result.person_score
+        << ",coords=" << (frame.transform.letterboxed ? "source_after_letterbox_inverse" : "model_input");
     result.message = oss.str();
     return result;
 }
@@ -1085,13 +1162,15 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
                 [](const Box& lhs, const Box& rhs) {
                     return lhs.score < rhs.score;
                 });
+            inverseTransformCupResult(result, frame);
 
             std::ostringstream oss;
             oss << parser_name
                 << ",class_ids=" << drinkClassIdsForLog()
                 << ",candidates=" << candidate_count
                 << ",kept_after_nms=" << result.cups.size()
-                << ",best_score=" << result.cup_box.score;
+                << ",best_score=" << result.cup_box.score
+                << ",coords=" << (frame.transform.letterboxed ? "source_after_letterbox_inverse" : "model_input");
             result.message = oss.str();
             return result;
         }
@@ -1128,7 +1207,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
                 frame.width,
                 frame.height);
             cup.score = score;
-            cup.label = "cup";
+            cup.label = "cup(class_unknown)";
             result.cups.push_back(cup);
             ++parsed_boxes;
         }
@@ -1142,10 +1221,12 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
             [](const Box& lhs, const Box& rhs) {
                 return lhs.score < rhs.score;
             });
+        inverseTransformCupResult(result, frame);
 
         std::ostringstream oss;
         oss << "cup_flat_boxes_no_class_id,boxes=" << parsed_boxes
-            << ",best_score=" << result.cup_box.score;
+            << ",best_score=" << result.cup_box.score
+            << ",coords=" << (frame.transform.letterboxed ? "source_after_letterbox_inverse" : "model_input");
         result.message = oss.str();
         return result;
     }

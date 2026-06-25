@@ -203,6 +203,17 @@ struct AppConfig {
     int st7789_gpio_backlight{25};
 };
 
+struct PreprocessTransform {
+    bool letterboxed{false};
+    float scale{1.0F};
+    float pad_x{0.0F};
+    float pad_y{0.0F};
+    int crop_x{0};
+    int crop_y{0};
+    int source_width{0};
+    int source_height{0};
+};
+
 struct Frame {
     uint64_t id{0};
     int width{0};
@@ -210,6 +221,7 @@ struct Frame {
     int channels{0};
     PixelFormat format{PixelFormat::RGB888};
     int64_t timestamp_ms{0};
+    PreprocessTransform transform;
     std::vector<uint8_t> data;
 };
 

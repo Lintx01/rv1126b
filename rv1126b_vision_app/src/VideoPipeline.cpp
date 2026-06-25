@@ -163,6 +163,7 @@ void prepareRgbDestination(const Frame& src, int dst_width, int dst_height, Fram
     dst.channels = 3;
     dst.format = PixelFormat::RGB888;
     dst.timestamp_ms = src.timestamp_ms;
+    dst.transform = PreprocessTransform{};
     dst.data.resize(static_cast<std::size_t>(dst_width) * static_cast<std::size_t>(dst_height) * 3U);
 }
 
@@ -539,6 +540,16 @@ bool ImageProcessor::letterbox(
     dst.channels = 3;
     dst.format = PixelFormat::RGB888;
     dst.timestamp_ms = src.timestamp_ms;
+    dst.transform = PreprocessTransform{
+        true,
+        scale,
+        static_cast<float>(pad_x),
+        static_cast<float>(pad_y),
+        normalized.x,
+        normalized.y,
+        src.width,
+        src.height
+    };
     dst.data.assign(
         static_cast<std::size_t>(dst_width) *
             static_cast<std::size_t>(dst_height) * 3U,
@@ -763,6 +774,7 @@ bool ImageProcessor::cropResizeByOpenCv(
     dst.channels = 3;
     dst.format = PixelFormat::RGB888;
     dst.timestamp_ms = src.timestamp_ms;
+    dst.transform = PreprocessTransform{};
 
     const std::size_t output_size =
         static_cast<std::size_t>(dst_width) *

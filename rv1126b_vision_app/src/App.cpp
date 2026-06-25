@@ -21,6 +21,7 @@ namespace rv1126b {
 namespace {
 
 std::atomic<bool> g_signal_exit_requested{false};
+constexpr int64_t kMaxPoseCupFusionDeltaMs = 300;
 
 void handleExitSignal(int) {
     g_signal_exit_requested = true;
@@ -184,6 +185,36 @@ const char* drinkStateLabel(DrinkState state) {
             return "检测到喝水";
     }
     return "未知";
+}
+
+std::string boxSummary(const Box& box) {
+    std::ostringstream oss;
+    oss << (box.label.empty() ? "box" : box.label)
+        << "(score=" << std::fixed << std::setprecision(2) << box.score
+        << ",xywh=" << static_cast<int>(box.x) << ","
+        << static_cast<int>(box.y) << ","
+        << static_cast<int>(box.w) << ","
+        << static_cast<int>(box.h) << ")";
+    return oss.str();
+}
+
+std::string cupBoxesSummary(const CupResult& result) {
+    if (result.cups.empty()) {
+        return "none";
+    }
+
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < result.cups.size(); ++i) {
+        if (i > 0) {
+            oss << "|";
+        }
+        oss << boxSummary(result.cups[i]);
+    }
+    return oss.str();
+}
+
+int64_t absDeltaMs(int64_t lhs, int64_t rhs) {
+    return lhs >= rhs ? lhs - rhs : rhs - lhs;
 }
 
 bool shouldPublishCooldownEvent(const AppConfig& config, const std::string& event_name) {
@@ -759,7 +790,10 @@ void VisionApp::aiLoop() {
                     std::cout << "[核心][pose] valid=" << (last_pose_result.valid ? "true" : "false")
                               << ", has_person=" << (last_pose_result.has_person ? "true" : "false")
                               << ", person_score=" << last_pose_result.person_score
-                              << ", frame=" << last_pose_result.frame_id << "\n";
+                              << ", frame=" << last_pose_result.frame_id
+                              << ", nms_box="
+                              << (last_pose_result.has_person ? boxSummary(last_pose_result.person_box) : "none")
+                              << "\n";
                 }
             }
 
@@ -803,7 +837,9 @@ void VisionApp::aiLoop() {
                     has_cup_result = true;
                     std::cout << "[核心][cup] valid=" << (last_cup_result.valid ? "true" : "false")
                               << ", cups=" << last_cup_result.cups.size()
-                              << ", frame=" << last_cup_result.frame_id << "\n";
+                              << ", frame=" << last_cup_result.frame_id
+                              << ", nms_boxes=" << cupBoxesSummary(last_cup_result)
+                              << "\n";
                 }
             }
 
@@ -814,20 +850,36 @@ void VisionApp::aiLoop() {
             if (has_valid_three_model_result) {
                 if (has_pose_result) {
                     posture_state = posture_analyzer_.update(last_pose_result);
-                    std::cout << "[核心][坐姿判断] posture_state=" << toString(posture_state)
+                    std::cout << "[核心][坐姿判断] final_state=" << toString(posture_state)
                               << "(" << postureStateLabel(posture_state) << ")"
                               << ", pose_valid=" << (last_pose_result.valid ? "true" : "false")
                               << ", has_person=" << (last_pose_result.has_person ? "true" : "false")
                               << "\n";
                 }
                 if (has_pose_result && has_cup_result) {
-                    drink_state = drink_detector_.update(last_pose_result, last_cup_result);
-                    std::cout << "[核心][喝水判断] drink_state=" << toString(drink_state)
-                              << "(" << drinkStateLabel(drink_state) << ")"
-                              << ", pose_valid=" << (last_pose_result.valid ? "true" : "false")
-                              << ", cup_valid=" << (last_cup_result.valid ? "true" : "false")
-                              << ", cups=" << last_cup_result.cups.size()
-                              << "\n";
+                    const int64_t fusion_delta_ms =
+                        absDeltaMs(last_pose_result.timestamp_ms, last_cup_result.timestamp_ms);
+                    if (fusion_delta_ms <= kMaxPoseCupFusionDeltaMs) {
+                        drink_state = drink_detector_.update(last_pose_result, last_cup_result);
+                        std::cout << "[核心][喝水判断] final_state=" << toString(drink_state)
+                                  << "(" << drinkStateLabel(drink_state) << ")"
+                                  << ", pose_valid=" << (last_pose_result.valid ? "true" : "false")
+                                  << ", cup_valid=" << (last_cup_result.valid ? "true" : "false")
+                                  << ", cups=" << last_cup_result.cups.size()
+                                  << ", fusion_delta_ms=" << fusion_delta_ms
+                                  << "\n";
+                    } else {
+                        drink_detector_.reset();
+                        drink_state = DrinkState::NORMAL;
+                        std::cout << "[核心][喝水判断] final_state=" << toString(drink_state)
+                                  << "(" << drinkStateLabel(drink_state) << ")"
+                                  << ", reason=pose_cup_stale"
+                                  << ", pose_frame=" << last_pose_result.frame_id
+                                  << ", cup_frame=" << last_cup_result.frame_id
+                                  << ", fusion_delta_ms=" << fusion_delta_ms
+                                  << ", max_delta_ms=" << kMaxPoseCupFusionDeltaMs
+                                  << "\n";
+                    }
                 }
                 result = composeVisionResult(last_pose_result, last_cup_result, posture_state, drink_state);
                 result.message += ",pipeline=three_model";
