@@ -163,6 +163,7 @@ struct AppConfig {
     bool enable_display{true};
     bool enable_lvgl_display{false};
     bool lvgl_idle_only_test{true};
+    int display_timezone_offset_minutes{480};
     int display_tick_ms{5};
     int display_refresh_ms{20};
     bool enable_perf_log{true};

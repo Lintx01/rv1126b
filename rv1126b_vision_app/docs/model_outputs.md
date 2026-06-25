@@ -65,7 +65,7 @@
 - 代码入口：`CupModel::parseOutput()`
 - 输入 tensor：`images`，形状 `[1, 3, 640, 640]`
 - RKNN 内置预处理：RGB，除以 255，`mean=[0, 0, 0]`，`std=[255, 255, 255]`
-- 目标类别：COCO `class_id=41`，含义为 `cup`
+- 目标类别：COCO `class_id=39/40/41`，含义分别为 `bottle`、`wine glass`、`cup`
 - 输出数量：9
 
 输出 tensor：
@@ -97,14 +97,14 @@
 - 水杯最终置信度计算方式：
 
 ```text
-cup_score = class_score[class_id=41] * objectness_score
+drink_score = max(class_score[39], class_score[40], class_score[41]) * objectness_score
 ```
 
 后处理流程：
 
 - 按相同 grid 尺寸匹配 box、class、objectness 三个 tensor。
 - 对 box tensor 做 DFL 解码，得到检测框。
-- 只保留 `class_id=41` 的 cup 分数。
+- 只保留 `class_id=39/40/41` 的饮品容器分数，并取其中最高分作为候选框分数。
 - 使用 `cup_score_threshold` 过滤低分候选。
 - 执行 NMS，输出最终水杯框。
 
@@ -127,6 +127,7 @@ cup_postprocessed_boxes
 - `candidates`：NMS 之前、已经过阈值过滤的候选框数量。
 - `kept_after_nms`：NMS 之后保留下来的框数量。
 - `best_score`：保留下来的框中最高的分数。
+- `class_ids=39|40|41`：表示当前饮品容器检测会同时接受 bottle、wine glass、cup 三类。
 - `coords=original`：表示框或关键点已经从模型输入坐标映射回原始摄像头画面坐标。
 
 合理现象：

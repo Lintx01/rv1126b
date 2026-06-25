@@ -135,6 +135,7 @@ int main(int argc, char* argv[]) {
      */
     config.enable_display = true;
     config.enable_lvgl_display = true;
+    config.display_timezone_offset_minutes = 480;
     config.display_tick_ms = 5;
     config.display_refresh_ms = 20;
     config.st7789_spi_device = "/dev/spidev1.0";

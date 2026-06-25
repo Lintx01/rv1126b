@@ -129,17 +129,18 @@ void lvglFlush(lv_disp_drv_t* display, const lv_area_t* area, lv_color_t* color_
 }
 #endif
 
-bool localTime(std::tm& output) {
+bool utcOffsetTime(int offset_minutes, std::tm& output) {
     const std::time_t now = std::time(nullptr);
     if (now <= 0) {
         return false;
     }
+    const std::time_t adjusted = now + static_cast<std::time_t>(offset_minutes) * 60;
 #if defined(_WIN32)
-    if (localtime_s(&output, &now) != 0) {
+    if (gmtime_s(&output, &adjusted) != 0) {
         return false;
     }
 #else
-    if (localtime_r(&now, &output) == nullptr) {
+    if (gmtime_r(&adjusted, &output) == nullptr) {
         return false;
     }
 #endif
@@ -317,7 +318,7 @@ void DisplayDevice::showFace(DisplayFace face) {
         if (face == DisplayFace::IDLE_CLOCK) {
             showIdleClock();
         } else {
-            std::cout << "[Display][LVGL] face event ignored in idle-only test mode\n";
+            std::cout << "[Display][LVGL] 空闲时钟测试模式：忽略表情事件\n";
         }
         return;
     }
@@ -483,7 +484,7 @@ bool DisplayDevice::ensureLvglInitialized() {
     std::cout << "[Display][LVGL] enabled, resolution="
               << config_.st7789_width << "x" << config_.st7789_height << "\n";
     if (config_.lvgl_idle_only_test) {
-        std::cout << "[Display][LVGL] idle-only test mode\n";
+        std::cout << "[Display][LVGL] 空闲时钟测试模式\n";
     }
     std::cout << "[Display][LVGL] show IdleClock\n";
     updateIdleClock(true);
@@ -698,7 +699,8 @@ void DisplayDevice::createIdleClockPage() {
 
     createStatusPill();
     createBreathingDot();
-    std::cout << "[Display][Clock] using localtime, please ensure timezone is Asia/Shanghai\n";
+    std::cout << "[Display][Clock] 使用北京时间 UTC+8，屏幕时区偏移="
+              << config_.display_timezone_offset_minutes << " 分钟\n";
     std::cout << "[Display][LVGL] create IdleClock page\n";
 #endif
 }
@@ -718,10 +720,11 @@ void DisplayDevice::updateIdleClock(bool force) {
     idle_clock_last_update_ms_ = now_ms;
 
     std::tm tm_now{};
-    const bool time_ok = localTime(tm_now) && (tm_now.tm_year + 1900) >= 2024;
+    const bool time_ok =
+        utcOffsetTime(config_.display_timezone_offset_minutes, tm_now) && (tm_now.tm_year + 1900) >= 2024;
     if (!time_ok) {
         if (!lvgl_time_warning_printed_) {
-            std::cout << "[Display][LVGL] system time may not be synced\n";
+            std::cout << "[Display][LVGL] 系统时间可能尚未同步，无法显示北京时间\n";
             lvgl_time_warning_printed_ = true;
         }
         lv_label_set_text(lvgl_ui_->time_label, "--:--");

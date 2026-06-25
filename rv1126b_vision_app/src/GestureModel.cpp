@@ -12,14 +12,6 @@ namespace rv1126b {
 
 namespace {
 
-constexpr std::size_t kGestureClassCount = 15;
-
-// 手势分类模型输出 0~14 共 15 类。这里集中定义系统动作映射，后续只改 ID 即可。
-constexpr std::size_t kGestureNoneClassId = 0;
-constexpr std::size_t kGestureStartClassId = 1;
-constexpr std::size_t kGestureStopClassId = 2;
-constexpr std::size_t kGestureHeartClassId = 3;
-
 bool looksLikeProbability(const std::vector<float>& values) {
     if (values.empty()) {
         return false;
@@ -104,9 +96,9 @@ GestureResult GestureModel::parseOutput(
     const std::vector<std::vector<float>>& outputs) const {
     constexpr std::size_t kGestureClassCount = 15;
 
-    constexpr std::size_t kStartClassId = 0;
-    constexpr std::size_t kStopClassId = 5;
-    constexpr std::size_t kHeartClassId = 11;
+    constexpr std::size_t kStartClassId = 11;
+    constexpr std::size_t kStopClassId = 10;
+    constexpr std::size_t kHeartClassId = 12;
     constexpr std::size_t kLikeClassId = 13;
 
     GestureResult result;
