@@ -112,28 +112,34 @@ Box makeBoxFromCenter(float center_x, float center_y, float width, float height,
 }
 
 Point inverseTransformPoint(const Point& point, const Frame& frame) {
-    if (!frame.transform.letterboxed || frame.transform.scale <= 0.0F) {
+    const PreprocessTransform& transform = frame.transform;
+    if (!transform.valid || transform.model_width <= 0 || transform.model_height <= 0 ||
+        transform.source_crop.width <= 0 || transform.source_crop.height <= 0) {
         return point;
     }
 
-    const float source_width = static_cast<float>(std::max(1, frame.transform.source_width));
-    const float source_height = static_cast<float>(std::max(1, frame.transform.source_height));
+    const float source_width = static_cast<float>(std::max(1, transform.source_width));
+    const float source_height = static_cast<float>(std::max(1, transform.source_height));
+    const float x_scale = static_cast<float>(transform.source_crop.width) /
+                          static_cast<float>(transform.model_width);
+    const float y_scale = static_cast<float>(transform.source_crop.height) /
+                          static_cast<float>(transform.model_height);
     return Point{
         std::clamp(
-            (point.x - frame.transform.pad_x) / frame.transform.scale +
-                static_cast<float>(frame.transform.crop_x),
+            static_cast<float>(transform.source_crop.x) + point.x * x_scale,
             0.0F,
             source_width - 1.0F),
         std::clamp(
-            (point.y - frame.transform.pad_y) / frame.transform.scale +
-                static_cast<float>(frame.transform.crop_y),
+            static_cast<float>(transform.source_crop.y) + point.y * y_scale,
             0.0F,
             source_height - 1.0F)
     };
 }
 
 Box inverseTransformBox(const Box& box, const Frame& frame) {
-    if (!frame.transform.letterboxed || frame.transform.scale <= 0.0F) {
+    const PreprocessTransform& transform = frame.transform;
+    if (!transform.valid || transform.model_width <= 0 || transform.model_height <= 0 ||
+        transform.source_crop.width <= 0 || transform.source_crop.height <= 0) {
         return box;
     }
 
@@ -150,7 +156,9 @@ Box inverseTransformBox(const Box& box, const Frame& frame) {
 }
 
 void inverseTransformPoseResult(PoseResult& result, const Frame& frame) {
-    if (!frame.transform.letterboxed || frame.transform.scale <= 0.0F) {
+    const PreprocessTransform& transform = frame.transform;
+    if (!transform.valid || transform.model_width <= 0 || transform.model_height <= 0 ||
+        transform.source_crop.width <= 0 || transform.source_crop.height <= 0) {
         return;
     }
 
@@ -163,7 +171,9 @@ void inverseTransformPoseResult(PoseResult& result, const Frame& frame) {
 }
 
 void inverseTransformCupResult(CupResult& result, const Frame& frame) {
-    if (!frame.transform.letterboxed || frame.transform.scale <= 0.0F) {
+    const PreprocessTransform& transform = frame.transform;
+    if (!transform.valid || transform.model_width <= 0 || transform.model_height <= 0 ||
+        transform.source_crop.width <= 0 || transform.source_crop.height <= 0) {
         return;
     }
 
@@ -172,7 +182,6 @@ void inverseTransformCupResult(CupResult& result, const Frame& frame) {
         cup = inverseTransformBox(cup, frame);
     }
 }
-
 float sigmoid(float value) {
     return 1.0F / (1.0F + std::exp(-value));
 }
@@ -1065,7 +1074,7 @@ PoseResult PoseModel::parseOutput(const Frame& frame, const std::vector<std::vec
     oss << (used_raw_decoder ? "pose_yolov8_raw_dfl_decoder" : "pose_yolov8_decoded_tensor")
         << ",kept_after_nms=" << kept.size()
         << ",person_score=" << result.person_score
-        << ",coords=" << (frame.transform.letterboxed ? "source_after_letterbox_inverse" : "model_input");
+        << ",coords=" << (frame.transform.valid ? "source_after_resize_inverse" : "model_input");
     result.message = oss.str();
     return result;
 }
@@ -1170,7 +1179,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
                 << ",candidates=" << candidate_count
                 << ",kept_after_nms=" << result.cups.size()
                 << ",best_score=" << result.cup_box.score
-                << ",coords=" << (frame.transform.letterboxed ? "source_after_letterbox_inverse" : "model_input");
+                << ",coords=" << (frame.transform.valid ? "source_after_resize_inverse" : "model_input");
             result.message = oss.str();
             return result;
         }
@@ -1226,7 +1235,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
         std::ostringstream oss;
         oss << "cup_flat_boxes_no_class_id,boxes=" << parsed_boxes
             << ",best_score=" << result.cup_box.score
-            << ",coords=" << (frame.transform.letterboxed ? "source_after_letterbox_inverse" : "model_input");
+            << ",coords=" << (frame.transform.valid ? "source_after_resize_inverse" : "model_input");
         result.message = oss.str();
         return result;
     }

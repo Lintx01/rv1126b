@@ -16,6 +16,16 @@ void handleExitSignal(int) {
     g_exit_requested = true;
 }
 
+bool isEnabledEnvValue(const char* value) {
+    if (value == nullptr) {
+        return false;
+    }
+    return std::strcmp(value, "1") == 0 ||
+           std::strcmp(value, "true") == 0 ||
+           std::strcmp(value, "on") == 0 ||
+           std::strcmp(value, "yes") == 0;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -82,6 +92,10 @@ int main(int argc, char* argv[]) {
         config.fallback_to_opencv = true;
         std::cout << "[Config] preprocess_mode=opencv(default)\n";
     }
+
+    config.force_ai_running = isEnabledEnvValue(std::getenv("RV_FORCE_AI_RUNNING"));
+    std::cout << "[Config] force_ai_running="
+              << (config.force_ai_running ? "true" : "false") << "\n";
 
     config.web_stream_protocol = rv1126b::WebStreamProtocol::HttpFlv;
     config.device_ip = "192.168.137.2";

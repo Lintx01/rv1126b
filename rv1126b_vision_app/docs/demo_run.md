@@ -89,10 +89,10 @@ Key log lines:
 [AI][模型] 调用 gesture(手势), frame=123, input=224x224, preprocess=resize
 [手势识别] frame=123, top1=class_13(点赞)
 [手势事件] 点赞，class_13(点赞)
-[ImageProcessor] letterbox ok, src=640x480, resized=640x480, pad=(0,80), dst=640x640
-[AI][模型] 调用 pose(姿态), frame=123, input=640x640, preprocess=letterbox
+[ImageProcessor] 等比补边 ok, src=640x480, resized=640x480, pad=(0,80), dst=640x640
+[AI][模型] 调用 pose(姿态), frame=123, input=640x640, preprocess=等比补边
 [核心][pose] valid=true, has_person=true, person_score=0.82, frame=123, nms_box=person(score=0.82,xywh=120,48,300,410)
-[AI][模型] 调用 cup(饮品), frame=123, input=640x640, preprocess=letterbox
+[AI][模型] 调用 cup(饮品), frame=123, input=640x640, preprocess=等比补边
 [核心][cup] valid=true, cups=1, frame=123, nms_boxes=cup(class_41)(score=0.76,xywh=420,260,80,120)
 [核心][坐姿判断] final_state=good(正常), pose_valid=true, has_person=true
 [核心][喝水判断] final_state=normal(正常), pose_valid=true, cup_valid=true, cups=1, fusion_delta_ms=0
@@ -100,7 +100,7 @@ Key log lines:
 
 The logs prefer Chinese for operator-facing text while keeping model names, enum names, tensor messages, and numeric fields in English where they are useful for debugging.
 
-Preprocess convention: gesture uses direct resize to `224x224`; pose and cup use letterbox to `640x640`, then boxes/keypoints are transformed back to source-frame coordinates before logging and overlay.
+Preprocess convention: gesture uses direct resize to `224x224`; pose and cup use 等比补边 to `640x640`, then boxes/keypoints are transformed back to source-frame coordinates before logging and overlay.
 
 ## Board Time Check
 

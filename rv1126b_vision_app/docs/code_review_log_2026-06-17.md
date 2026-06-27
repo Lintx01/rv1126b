@@ -89,4 +89,4 @@
 - Cup 后处理：`CupModel::parseOutput()` 支持 YOLOv8 detect raw DFL、decoded `[N,84]/[84,N]`、后处理 boxes、无 class 的 flat boxes，并只保留 COCO 饮品容器类 `class_id=39/40/41`。
 - 坐标映射修正：新增 `PreprocessTransform`，AI 预处理后保存原图尺寸、crop 区域和模型输入尺寸。`PoseModel` / `CupModel` 输出仍先按模型输入坐标解析，随后在 `App::aiLoop()` 内反变换回原始帧坐标。
 - 饮水判断坐标系：`DrinkDetector::update()` 现在接收已经反变换后的 pose/cup 结果，因此“杯子中心到鼻子/头点距离”的逻辑判断使用原图坐标；网页叠框也可复用同一批原图坐标。
-- 仍需注意：当前预处理是直接 resize，不是 letterbox；因此反变换按 `crop + x/y 独立 scale` 计算。若后续改成 YOLO 常见 letterbox，需要在 `PreprocessTransform` 中增加 padding 信息。
+- 仍需注意：当前预处理是直接 resize，不是 等比补边；因此反变换按 `crop + x/y 独立 scale` 计算。若后续改成 YOLO 常见 等比补边，需要在 `PreprocessTransform` 中增加 padding 信息。

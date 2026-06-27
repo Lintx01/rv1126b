@@ -1,0 +1,253 @@
+# 当前项目能力说明
+
+## 1. 当前工程路径
+
+当前工程路径：
+
+```bash
+C:\Users\AgiUser\Desktop\代码\6.27\rv1126b\rv1126b_vision_app
+```
+
+本文件基于该目录下当前最新代码检查生成，不基于旧目录或旧记忆。
+
+## 2. 当前主要功能
+
+当前代码支持的主要能力：
+
+* 摄像头采集：主程序默认使用 `/dev/video23`，默认帧尺寸为 `640x480`，目标帧率 `25fps`。
+* 手势模型：已接入手势 RKNN 模型，当前主程序默认模型路径为 `model/yolov5_gesture_rv1126b.rknn`，输入尺寸为 `224x224`。
+* 姿态模型：已接入姿态 RKNN 模型，当前主程序默认模型路径为 `model/yolov8n-pose-rv1126b-i8.rknn`，输入尺寸为 `640x640`。
+* 水杯模型：已接入水杯/饮品 RKNN 模型，当前主程序默认模型路径为 `model/yolov8n_rv1126b_i8.rknn`，输入尺寸为 `640x640`。
+* MPP H.264 编码：主程序配置中 `enable_mpp_encoder = true`，用于输出 H.264 视频流。
+* 视频 overlay：当前使用轻量 NV12 Y 平面画框方式，不依赖 OpenCV，不做全帧颜色空间转换；只画 pose/cup 产生的 oxes，手势分类结果不会画框。
+* HTTP-FLV 输出：主程序当前设置 `web_stream_protocol = HttpFlv`，默认 Web 端口为 `8080`，用于输出 `http://<board_ip>:8080/live.flv`。
+* RTSP relay + VLC 播放：存在 `tools/rtsp_relay.cpp`，在 `-DRV1126B_ENABLE_GSTREAMER_RTSP=ON` 且依赖满足时生成 `rv1126b_rtsp_relay`，可把 HTTP-FLV 转成 RTSP 给 VLC 播放。
+* ST7789/LVGL 显示：主程序默认 `enable_display = true`、`enable_lvgl_display = true`，ST7789 默认设备为 `/dev/spidev1.0`，支持 `--display-only` 测试待机页。
+* MQTT：代码支持 MQTT 客户端、状态/遥测/事件发布逻辑；CMake 选项 `RV1126B_ENABLE_MQTT` 默认是 `ON`，但当前 `src/main.cpp` 中运行配置 `config.enable_mqtt = false`，所以主程序默认关闭 MQTT。比赛编译命令也建议先用 `-DRV1126B_ENABLE_MQTT=OFF`。
+* 单图测试工具：当前存在 `tools/gesture_image_test.cpp` 和 `tools/single_image_ai_debug.cpp`，CMake 中存在对应 target。
+
+## 3. 当前模型文件
+
+根据当前代码 grep 结果，主程序真实默认模型路径为：
+
+* `gesture_model_path`: `model/yolov5_gesture_rv1126b.rknn`
+* `pose_model_path`: `model/yolov8n-pose-rv1126b-i8.rknn`
+* `cup_model_path`: `model/yolov8n_rv1126b_i8.rknn`
+
+当前 `model/` 目录中可见文件：
+
+* `model/bottle_rv1126b_i8.rknn`
+* `model/gesture_mobilenetv3_small_fp16.rknn`
+* `model/yolov5_gesture_rv1126b.rknn`
+* `model/yolov8n-pose-rv1126b-i8.rknn`
+* `model/yolov8n_rv1126b_i8.rknn`
+
+注意：`src/main.cpp` 中还保留 `posture_drink_model_path = "/userdata/models/posture_drink.rknn"`，但当前配置为 `use_three_model_pipeline = true`、`use_legacy_posture_drink_model = false`，比赛主线应以手势、姿态、水杯三模型为准。
+
+## 4. 主程序编译命令
+
+比赛演示编译命令：
+
+```bash
+cmake -S . -B build-rtsp \
+-DRV1126B_ENABLE_LVGL=ON \
+-DRV1126B_ENABLE_RGA=ON \
+-DRV1126B_ENABLE_RKNN=ON \
+-DRV1126B_ENABLE_OPENCV=ON \
+-DRV1126B_ENABLE_MPP=ON \
+-DRV1126B_ENABLE_MQTT=OFF \
+-DRV1126B_ENABLE_GSTREAMER_RTSP=ON
+
+cmake --build build-rtsp -j2
+```
+
+最小编译检查命令：
+
+```bash
+cmake -S . -B build-check-off \
+-DRV1126B_ENABLE_LVGL=OFF \
+-DRV1126B_ENABLE_RGA=OFF \
+-DRV1126B_ENABLE_RKNN=OFF \
+-DRV1126B_ENABLE_OPENCV=OFF \
+-DRV1126B_ENABLE_MPP=OFF \
+-DRV1126B_ENABLE_MQTT=OFF \
+-DRV1126B_ENABLE_GSTREAMER_RTSP=OFF
+
+cmake --build build-check-off -j2
+```
+
+## 5. 主程序运行命令
+
+普通运行：
+
+```bash
+./build-rtsp/rv1126b_vision_app
+```
+
+当前版本已去掉等比补边，实时主程序统一使用 resize 预处理。
+`RV_PREPROCESS_MODE` 只控制预处理后端：
+
+* `rga`：优先 RGA resize
+* `opencv`：优先 OpenCV resize
+
+不再支持已移除的预处理几何环境变量。如果后续模型效果变差，需要重新评估模型训练/导出时是否依赖等比补边。
+
+RGA 运行：
+
+```bash
+RV_PREPROCESS_MODE=rga ./build-rtsp/rv1126b_vision_app
+```
+
+`RV_FORCE_AI_RUNNING` 支持 `1`、`true`、`on`、`yes`。设置后主程序会跳过手势启动，直接进入 Running 状态，方便测试 pose/cup/视频 overlay。
+
+```bash
+RV_FORCE_AI_RUNNING=1 \
+RV_PREPROCESS_MODE=rga \
+./build-rtsp/rv1126b_vision_app
+```
+
+## 6. VLC 推流命令
+
+终端 1：启动主程序，生成 HTTP-FLV：
+
+```bash
+RV_FORCE_AI_RUNNING=1 \
+RV_PREPROCESS_MODE=rga \
+./build-rtsp/rv1126b_vision_app
+```
+
+终端 2：启动 RTSP relay，把 HTTP-FLV 转成 RTSP：
+
+```bash
+./build-rtsp/rv1126b_rtsp_relay \
+--input http://127.0.0.1:8080/live.flv \
+--port 8554 \
+--mount /live
+```
+
+Windows VLC 地址：
+
+```text
+rtsp://192.168.137.2:8554/live
+```
+
+HTTP-FLV 地址：
+
+```text
+http://192.168.137.2:8080/live.flv
+```
+
+如果 `build-rtsp/rv1126b_rtsp_relay` 不存在，需要打开 `-DRV1126B_ENABLE_GSTREAMER_RTSP=ON` 重新编译，并确认板子有 GStreamer RTSP server 依赖。
+
+## 7. 单图测试功能
+
+当前存在：
+
+* `tools/gesture_image_test.cpp`
+* `tools/single_image_ai_debug.cpp`
+
+编译命令：
+
+```bash
+cmake -S . -B build-tools \
+-DRV1126B_ENABLE_RKNN=ON \
+-DRV1126B_ENABLE_OPENCV=ON \
+-DRV1126B_ENABLE_RGA=OFF \
+-DRV1126B_ENABLE_LVGL=OFF \
+-DRV1126B_ENABLE_MPP=OFF \
+-DRV1126B_ENABLE_MQTT=OFF \
+-DRV1126B_ENABLE_GSTREAMER_RTSP=OFF
+
+cmake --build build-tools -j2 --target gesture_image_test single_image_ai_debug
+```
+
+运行命令：
+
+```bash
+./build-tools/gesture_image_test /path/to/gesture.jpg
+
+./build-tools/single_image_ai_debug /path/to/test.jpg
+```
+
+当前代码中可见的调试输出路径：
+
+* `gesture_image_test`: `/tmp/gesture_input_rgb_debug.jpg`
+* `gesture_image_test`: `/tmp/gesture_input_bgr_debug.jpg`
+* `single_image_ai_debug`: `/tmp/debug_gesture_input.jpg`
+* `single_image_ai_debug`: `/tmp/debug_pose_input.jpg`
+* `single_image_ai_debug`: `/tmp/debug_cup_input.jpg`
+* `single_image_ai_debug`: `/tmp/single_image_ai_debug_overlay.jpg`
+
+单图测试工具是否和实时主程序使用同一套预处理逻辑，需要以后确认；不要把单图结果直接等同于实时视频效果。
+
+gesture_image_test 是当前推荐的手势模型调试工具，用于确认手势图片输出的 class、top5、概率和映射后的 GestureType。它不等同于视频检测框；手势模型是分类模型，不会输出框。
+
+## 8. ST7789/LVGL 测试
+
+当前支持 `--display-only`：
+
+```bash
+./build-rtsp/rv1126b_vision_app --display-only
+```
+
+这个命令用于只测试 ST7789/LVGL，不跑摄像头、不跑 AI、不推流。当前 display-only 分支会打开显示设备、调用 `showIdleClock()`，并持续 `tick()`。
+
+## 9. 当前已知限制
+
+1. 当前 RTSP/VLC 使用的 H.264 视频流支持轻量 NV12 Y 平面画框；如果只跑 gesture，不会出现视频框。如果 pose/cup 没有 boxes，也不会出现框。结果超过 `video_overlay_result_ttl_frames` 会自动过期，避免旧框残留。
+2. 手势模型是分类模型，不会在视频上画手势框。
+3. 如果只看到 schedule gesture，而 `pose_ms`/`cup_ms` 为 `0`，说明当前没有调度姿态/水杯模型。
+4. ST7789 当前待机页可用，但手势表情页面/业务表情还未完全完成。
+5. 北京时间显示策略需要确认，避免系统时间和代码偏移重复。当前配置里有 `display_timezone_offset_minutes = 480`。
+6. 当前代码版本多，命令和文档容易混乱，需要以本文件为当前版本准则。
+7. 等比补边 功能后续准备移除或整理，不作为当前比赛主线。
+8. `RV_FORCE_AI_RUNNING=1` 会让主程序初始进入 Running 状态；默认不设置时仍然从 Idle 开始，等待手势启动。
+9. `已移除的预处理几何环境变量` 本次 grep 未在 `src/`、`include/`、`tools/`、`run_demo.sh` 中发现，当前不应作为主线运行参数。
+10. MQTT 代码存在，但当前主程序运行配置默认关闭；如果要作为比赛状态数据链路，需要单独确认 broker、编译选项和运行配置。
+
+## 10. 调试命令
+
+查看实际模型加载：
+
+```bash
+grep -E "model loaded|GestureModel|PoseModel|CupModel|read model failed|fallback|stub" logs/run_model.log
+```
+
+查看实际 AI 调度：
+
+```bash
+grep -E "[AI].*gesture|[AI].*pose|[AI].*cup|gesture_ms|pose_ms|cup_ms" logs/run_model.log
+```
+
+查看端口：
+
+```bash
+ss -lntp | grep 8080
+ss -lntp | grep 8554
+```
+
+摄像头占用处理：
+
+```bash
+pkill -f rv1126b_vision_app
+pkill -f rv1126b_rtsp_relay
+fuser -k /dev/video23
+```
+
+8554 占用处理：
+
+```bash
+fuser -k 8554/tcp
+```
+
+## 11. 最终比赛建议
+
+当前比赛主线建议：
+
+* ST7789/LVGL 本地状态显示。
+* RTSP + VLC 视频流。
+* MQTT 状态数据，如果当前 MQTT 稳定。
+* 手势和水杯模型继续校准。
+
+不要把 WebRTC、网页播放、HTTP-FLV 浏览器播放作为当前主线。HTTP-FLV 当前更适合作为主程序到 RTSP relay 的中间输入。
+

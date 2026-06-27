@@ -53,6 +53,158 @@ struct MqttRuntimeState {
 
 MqttRuntimeState g_mqtt_runtime_state;
 
+struct LatestVisionResultState {
+    std::mutex mutex;
+    VisionResult latest_result{};
+    bool has_result{false};
+};
+
+LatestVisionResultState g_latest_vision_result_state;
+std::atomic<bool> g_overlay_enabled_logged{false};
+std::atomic<bool> g_overlay_format_warned{false};
+
+void resetLatestVisionResult() {
+    std::lock_guard<std::mutex> lock(g_latest_vision_result_state.mutex);
+    g_latest_vision_result_state.latest_result = VisionResult{};
+    g_latest_vision_result_state.has_result = false;
+}
+
+void updateLatestVisionResult(const VisionResult& result) {
+    std::lock_guard<std::mutex> lock(g_latest_vision_result_state.mutex);
+    g_latest_vision_result_state.latest_result = result;
+    g_latest_vision_result_state.has_result = true;
+}
+
+bool getLatestVisionResult(VisionResult& result) {
+    std::lock_guard<std::mutex> lock(g_latest_vision_result_state.mutex);
+    if (!g_latest_vision_result_state.has_result) {
+        return false;
+    }
+    result = g_latest_vision_result_state.latest_result;
+    return true;
+}
+
+int clampInt(int value, int lo, int hi) {
+    return std::max(lo, std::min(value, hi));
+}
+
+void drawRectOnNv12Y(
+    Frame& frame,
+    int x,
+    int y,
+    int w,
+    int h,
+    uint8_t y_value,
+    int thickness) {
+    if (frame.format != PixelFormat::NV12 || frame.width <= 0 || frame.height <= 0) {
+        return;
+    }
+    if (frame.data.size() < static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height)) {
+        return;
+    }
+
+    int x0 = clampInt(x, 0, frame.width - 1);
+    int y0 = clampInt(y, 0, frame.height - 1);
+    int x1 = clampInt(x + w - 1, 0, frame.width - 1);
+    int y1 = clampInt(y + h - 1, 0, frame.height - 1);
+    if (x1 < x0) {
+        std::swap(x0, x1);
+    }
+    if (y1 < y0) {
+        std::swap(y0, y1);
+    }
+    if ((x1 - x0 + 1) < 2 || (y1 - y0 + 1) < 2) {
+        return;
+    }
+
+    const int line_width = std::max(1, thickness);
+    const int stride = frame.width;
+    uint8_t* y_plane = frame.data.data();
+
+    for (int t = 0; t < line_width; ++t) {
+        const int top = y0 + t;
+        const int bottom = y1 - t;
+        if (top > y1 || bottom < y0) {
+            break;
+        }
+        for (int px = x0; px <= x1; ++px) {
+            y_plane[top * stride + px] = y_value;
+            y_plane[bottom * stride + px] = y_value;
+        }
+        for (int py = y0; py <= y1; ++py) {
+            const int left = x0 + t;
+            const int right = x1 - t;
+            if (left <= x1) {
+                y_plane[py * stride + left] = y_value;
+            }
+            if (right >= x0) {
+                y_plane[py * stride + right] = y_value;
+            }
+        }
+    }
+}
+
+int countDrawableOverlayBoxes(const Frame& frame, const VisionResult& result, const AppConfig& config) {
+    const int max_boxes = std::max(0, config.video_overlay_max_boxes);
+    int count = 0;
+    for (const Box& box : result.boxes) {
+        if (count >= max_boxes) {
+            break;
+        }
+        const int w = static_cast<int>(box.w + 0.5F);
+        const int h = static_cast<int>(box.h + 0.5F);
+        if (w < 2 || h < 2) {
+            continue;
+        }
+        const int x = static_cast<int>(box.x + 0.5F);
+        const int y = static_cast<int>(box.y + 0.5F);
+        if (x >= frame.width || y >= frame.height || (x + w) <= 0 || (y + h) <= 0) {
+            continue;
+        }
+        ++count;
+    }
+    return count;
+}
+
+bool applyLightweightOverlay(Frame& frame, const VisionResult& result, const AppConfig& config) {
+    if (frame.format != PixelFormat::NV12) {
+        if (!g_overlay_format_warned.exchange(true)) {
+            std::cout << "[Overlay][WARN] lightweight overlay only supports NV12, skip\n";
+        }
+        return false;
+    }
+
+    if (!g_overlay_enabled_logged.exchange(true)) {
+        std::cout << "[Overlay] lightweight NV12 Y-plane overlay enabled\n";
+    }
+
+    const int max_boxes = std::max(0, config.video_overlay_max_boxes);
+    const int thickness = std::max(1, config.video_overlay_thickness);
+    int drawn = 0;
+    for (const Box& box : result.boxes) {
+        if (drawn >= max_boxes) {
+            break;
+        }
+        const int x = static_cast<int>(box.x + 0.5F);
+        const int y = static_cast<int>(box.y + 0.5F);
+        const int w = static_cast<int>(box.w + 0.5F);
+        const int h = static_cast<int>(box.h + 0.5F);
+        if (w < 2 || h < 2) {
+            continue;
+        }
+        if (x >= frame.width || y >= frame.height || (x + w) <= 0 || (y + h) <= 0) {
+            continue;
+        }
+
+        drawRectOnNv12Y(frame, x, y, w, h, 235U, thickness);
+        if (w > (thickness * 2 + 2) && h > (thickness * 2 + 2)) {
+            drawRectOnNv12Y(frame, x + thickness, y + thickness, w - thickness * 2, h - thickness * 2, 40U, 1);
+        }
+        ++drawn;
+    }
+    return drawn > 0;
+}
+
 void resetMqttRuntimeState() {
     std::lock_guard<std::mutex> lock(g_mqtt_runtime_state.mutex);
     g_mqtt_runtime_state.latest_app_state = AppState{};
@@ -424,9 +576,18 @@ bool VisionApp::start() {
 
         exit_requested_ = false;
         thread_error_ = false;
-        state_ = SystemState::Idle;
+        if (config_.force_ai_running) {
+            state_ = SystemState::Running;
+            drink_detector_.reset();
+            ai_scheduler_.reset();
+            std::cout << "[State] initial Running by RV_FORCE_AI_RUNNING\n";
+        } else {
+            state_ = SystemState::Idle;
+            std::cout << "[State] initial Idle\n";
+        }
         g_signal_exit_requested = false;
         resetMqttRuntimeState();
+        resetLatestVisionResult();
 
         camera_thread_ = std::thread(&VisionApp::runThread, this, "camera", [this] { cameraLoop(); });
         if (shouldRunEncoderPipeline()) {
@@ -588,9 +749,37 @@ void VisionApp::encoderLoop() {
         last_encoded_frame_id = frame_id;
         perf_.encoder_frames.fetch_add(1, std::memory_order_relaxed);
 
+        const Frame* frame_to_encode = item->get();
+        Frame overlay_frame;
+        bool overlay_applied = false;
+        int overlay_box_count = 0;
+        if (config_.enable_video_overlay) {
+            VisionResult latest_result;
+            if (getLatestVisionResult(latest_result) && latest_result.frame_id <= frame_id) {
+                const uint64_t age_frames = frame_id - latest_result.frame_id;
+                const uint64_t ttl_frames = static_cast<uint64_t>(std::max(0, config_.video_overlay_result_ttl_frames));
+                if (age_frames <= ttl_frames) {
+                    overlay_box_count = countDrawableOverlayBoxes(**item, latest_result, config_);
+                    if (overlay_box_count > 0) {
+                        overlay_frame = **item;
+                        const auto overlay_begin = std::chrono::steady_clock::now();
+                        overlay_applied = applyLightweightOverlay(overlay_frame, latest_result, config_);
+                        perf_.overlay.addSample(elapsedUs(overlay_begin));
+                        if (overlay_applied) {
+                            frame_to_encode = &overlay_frame;
+                            if ((frame_id % 300U) == 0U) {
+                                std::cout << "[Overlay] lightweight enabled, boxes=" << overlay_box_count
+                                          << ", frame=" << frame_id << "\n";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         EncodedPacket packet;
         const auto encode_begin = std::chrono::steady_clock::now();
-        if (mpp_encoder_.encode(**item, packet)) {
+        if (mpp_encoder_.encode(*frame_to_encode, packet)) {
             perf_.mpp_encode.addSample(elapsedUs(encode_begin));
             web_.publishEncodedVideo(packet);
         } else {
@@ -651,15 +840,6 @@ void VisionApp::aiLoop() {
         auto preprocessInput = [&](const char* model_name, int width, int height, Frame& output) {
             if (!image_processor_.cropResize(*frame, full_frame_crop, width, height, output)) {
                 std::cerr << "[AI] image preprocess failed, model=" << model_name
-                          << ", frame=" << frame->id
-                          << ", input=" << width << "x" << height << "\n";
-                return false;
-            }
-            return true;
-        };
-        auto preprocessLetterboxInput = [&](const char* model_name, int width, int height, Frame& output) {
-            if (!image_processor_.letterbox(*frame, full_frame_crop, width, height, output)) {
-                std::cerr << "[AI] image letterbox failed, model=" << model_name
                           << ", frame=" << frame->id
                           << ", input=" << width << "x" << height << "\n";
                 return false;
@@ -751,7 +931,7 @@ void VisionApp::aiLoop() {
         if (config_.use_three_model_pipeline) {
             if (decision.run_pose) {
                 Frame pose_input;
-                if (!preprocessLetterboxInput(
+                if (!preprocessInput(
                         "pose",
                         config_.pose_input_width,
                         config_.pose_input_height,
@@ -766,7 +946,7 @@ void VisionApp::aiLoop() {
                 } else {
                     std::cout << "[AI][模型] 调用 pose(姿态), frame=" << pose_input.id
                               << ", input=" << pose_input.width << "x" << pose_input.height
-                              << ", preprocess=letterbox\n";
+                              << ", preprocess=resize\n";
                     const auto pose_begin = std::chrono::steady_clock::now();
                     try {
                         last_pose_result = pose_model_.infer(pose_input);
@@ -799,7 +979,7 @@ void VisionApp::aiLoop() {
 
             if (decision.run_cup) {
                 Frame cup_input;
-                if (!preprocessLetterboxInput(
+                if (!preprocessInput(
                         "cup",
                         config_.cup_input_width,
                         config_.cup_input_height,
@@ -814,7 +994,7 @@ void VisionApp::aiLoop() {
                 } else {
                     std::cout << "[AI][模型] 调用 cup(饮品), frame=" << cup_input.id
                               << ", input=" << cup_input.width << "x" << cup_input.height
-                              << ", preprocess=letterbox\n";
+                              << ", preprocess=resize\n";
                     const auto cup_begin = std::chrono::steady_clock::now();
                     try {
                         last_cup_result = cup_model_.infer(cup_input);
@@ -949,6 +1129,7 @@ void VisionApp::aiLoop() {
             continue;
         }
 
+        updateLatestVisionResult(result);
         web_.publishResult(result);
         enqueueAlarmMessages(result);
         publishDisplayState(&result, posture_state, drink_state, std::string());

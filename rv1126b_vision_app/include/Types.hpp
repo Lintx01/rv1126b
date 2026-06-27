@@ -135,6 +135,9 @@ struct AppConfig {
     bool enable_mpp_decoder{false};
     bool enable_web_stream{false};
     bool enable_video_overlay{true};
+    int video_overlay_max_boxes{5};
+    int video_overlay_result_ttl_frames{30};
+    int video_overlay_thickness{2};
     bool input_stream_is_h264{false};
     int video_bitrate_kbps{2048};
     int video_gop{25};
@@ -167,6 +170,7 @@ struct AppConfig {
     float drink_distance_norm_threshold{0.40F};
     int drink_consecutive_hits{3};
     int debug_ai_delay_ms{0};
+    bool force_ai_running{false};
 
     std::string mqtt_host{"127.0.0.1"};
     bool enable_mqtt{false};
@@ -203,15 +207,20 @@ struct AppConfig {
     int st7789_gpio_backlight{25};
 };
 
+struct CropRect {
+    int x{0};
+    int y{0};
+    int width{0};
+    int height{0};
+};
+
 struct PreprocessTransform {
-    bool letterboxed{false};
-    float scale{1.0F};
-    float pad_x{0.0F};
-    float pad_y{0.0F};
-    int crop_x{0};
-    int crop_y{0};
     int source_width{0};
     int source_height{0};
+    CropRect source_crop;
+    int model_width{0};
+    int model_height{0};
+    bool valid{false};
 };
 
 struct Frame {
@@ -242,13 +251,6 @@ struct RtpPacket {
     bool marker{false};
     uint8_t payload_type{96};
     std::vector<uint8_t> bytes;
-};
-
-struct CropRect {
-    int x{0};
-    int y{0};
-    int width{0};
-    int height{0};
 };
 
 struct Point {
