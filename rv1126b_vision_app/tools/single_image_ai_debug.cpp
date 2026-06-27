@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -95,12 +96,72 @@ const char* drinkText(rv1126b::DrinkState state) {
     return "UNKNOWN";
 }
 
+std::string scoreText(float score) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3) << score;
+    return oss.str();
+}
+
 std::string boxText(const rv1126b::Box& box) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(1)
         << box.x << "," << box.y << "," << box.w << "," << box.h
         << "," << std::setprecision(3) << box.score;
     return oss.str();
+}
+
+std::string boxRectText(const rv1126b::Box& box) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1)
+        << box.x << "," << box.y << "," << box.w << "," << box.h;
+    return oss.str();
+}
+
+std::string messageField(const std::string& message, const std::string& key) {
+    const std::string prefix = key + "=";
+    const std::size_t begin = message.find(prefix);
+    if (begin == std::string::npos) {
+        return std::string();
+    }
+    const std::size_t value_begin = begin + prefix.size();
+    const std::size_t value_end = message.find(',', value_begin);
+    if (value_end == std::string::npos) {
+        return message.substr(value_begin);
+    }
+    return message.substr(value_begin, value_end - value_begin);
+}
+
+std::string messageFieldOr(const std::string& message, const std::string& key, const std::string& fallback) {
+    const std::string value = messageField(message, key);
+    return value.empty() ? fallback : value;
+}
+
+int classIdFromLabel(const std::string& label) {
+    const std::string marker = "class_";
+    const std::size_t begin = label.find(marker);
+    if (begin == std::string::npos) {
+        return -1;
+    }
+    const std::size_t digits_begin = begin + marker.size();
+    std::size_t digits_end = digits_begin;
+    while (digits_end < label.size() && std::isdigit(static_cast<unsigned char>(label[digits_end]))) {
+        ++digits_end;
+    }
+    if (digits_end == digits_begin) {
+        return -1;
+    }
+    try {
+        return std::stoi(label.substr(digits_begin, digits_end - digits_begin));
+    } catch (...) {
+        return -1;
+    }
+}
+
+std::string classIdText(int class_id) {
+    if (class_id < 0) {
+        return "unknown";
+    }
+    return std::to_string(class_id);
 }
 
 rv1126b::Box mapBoxToOriginal(
@@ -332,12 +393,43 @@ void printPose(const rv1126b::PoseResult& pose, rv1126b::PostureState posture) {
     }
 }
 
-void printCup(const rv1126b::CupResult& cup) {
+void printCup(const rv1126b::CupResult& cup, const rv1126b::AppConfig& config) {
+    const std::string class_ids = messageFieldOr(cup.message, "class_ids", "39|40|41");
+    const std::string candidates_before_nms = messageFieldOr(
+        cup.message,
+        "candidates_before_nms",
+        messageFieldOr(cup.message, "candidates", "0"));
+    const std::string kept_after_nms = messageFieldOr(
+        cup.message,
+        "kept_after_nms",
+        std::to_string(cup.cups.size()));
+    const int best_class_id = cup.cups.empty() ? -1 : classIdFromLabel(cup.cup_box.label);
+    const float best_score = cup.cups.empty() ? 0.0F : cup.cup_box.score;
+
     std::cout << "\n========== CUP ==========\n";
     std::cout << "valid=" << (cup.valid ? "true" : "false") << "\n";
     std::cout << "cup_count=" << cup.cups.size() << "\n";
+    std::cout << "threshold=" << scoreText(config.cup_score_threshold) << "\n";
+    std::cout << "class_ids=" << class_ids << "\n";
+    std::cout << "candidates_before_nms=" << candidates_before_nms << "\n";
+    std::cout << "kept_after_nms=" << kept_after_nms << "\n";
+    std::cout << "best_score=" << scoreText(best_score) << "\n";
+    std::cout << "best_class_id=" << best_class_id << "\n";
     std::cout << "best_box=" << boxText(cup.cup_box) << "\n";
     std::cout << "message=" << cup.message << "\n";
+    if (cup.cups.empty()) {
+        std::cout << "cups: none\n";
+        return;
+    }
+
+    std::cout << "cups:\n";
+    for (std::size_t i = 0; i < cup.cups.size(); ++i) {
+        const rv1126b::Box& box = cup.cups[i];
+        std::cout << i
+                  << " class_id=" << classIdText(classIdFromLabel(box.label))
+                  << " score=" << scoreText(box.score)
+                  << " box=" << boxRectText(box) << "\n";
+    }
 }
 
 }  // namespace
@@ -425,7 +517,7 @@ int main(int argc, char** argv) {
     std::cout << "message=\n";
 
     printPose(pose, posture);
-    printCup(cup);
+    printCup(cup, config);
 
     std::cout << "\n========== DRINK ==========\n";
     std::cout << "drink_state=" << drinkText(drink) << "\n";

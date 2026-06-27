@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <iomanip>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -57,15 +58,15 @@ const char* gestureActionLabel(GestureType type) {
             return "启动";
         case GestureType::Stop:
             return "停止";
-        case GestureType::Heart:
-            return "比心";
-        case GestureType::Like:
-            return "点赞";
+        case GestureType::Confirm:
+            return "确认";
+        case GestureType::Rock:
+            return "互动反馈";
     }
     return "未知动作";
 }
 
-bool looksLikeProbability(const std::vector<float>& values) {
+bool looksProbabilityLike(const std::vector<float>& values) {
     if (values.empty()) {
         return false;
     }
@@ -117,7 +118,7 @@ bool GestureModel::load(const AppConfig& config) {
               << (config.gesture_model_path.empty() ? "<pending>" : config.gesture_model_path)
               << ", mode=" << (fallback_mode_ ? "fallback" : "rknn") << "\n";
     std::cout << "[阈值][手势] 触发动作要求：top1_prob >= " << score_threshold_
-              << "，且 class 属于 5/6/12/13\n";
+              << "，class_6=start，class_5=stop，class_10|13=confirm，class_12=rock\n";
     return true;
 }
 
@@ -151,10 +152,11 @@ GestureResult GestureModel::parseOutput(
     const std::vector<std::vector<float>>& outputs) const {
     constexpr std::size_t kGestureClassCount = 15;
 
-    constexpr std::size_t kStartClassId = 5;
-    constexpr std::size_t kStopClassId = 6;
-    constexpr std::size_t kHeartClassId = 12;
-    constexpr std::size_t kLikeClassId = 13;
+    constexpr std::size_t kStartClassId = 6;
+    constexpr std::size_t kStopClassId = 5;
+    constexpr std::size_t kConfirmOkClassId = 10;
+    constexpr std::size_t kRockClassId = 12;
+    constexpr std::size_t kConfirmThumbClassId = 13;
 
     GestureResult result;
     result.frame_id = frame.id;
@@ -214,26 +216,25 @@ GestureResult GestureModel::parseOutput(
         mapped_type = GestureType::Start;
     } else if (class_id == kStopClassId) {
         mapped_type = GestureType::Stop;
-    } else if (class_id == kHeartClassId) {
-        mapped_type = GestureType::Heart;
-    } else if (class_id == kLikeClassId) {
-        mapped_type = GestureType::Like;
+    } else if (class_id == kConfirmOkClassId || class_id == kConfirmThumbClassId) {
+        mapped_type = GestureType::Confirm;
+    } else if (class_id == kRockClassId) {
+        mapped_type = GestureType::Rock;
     }
 
-    std::cout << "[手势识别] frame=" << frame.id
+    const bool pass_threshold = best_prob >= score_threshold_;
+    result.valid = pass_threshold && (mapped_type != GestureType::None);
+    result.type = result.valid ? mapped_type : GestureType::None;
+
+    std::cout << std::fixed << std::setprecision(3)
+              << "[手势识别] frame=" << frame.id
               << ", top1=class_" << class_id << "(" << gestureClassLabel(class_id) << ")"
+              << ", prob=" << best_prob
+              << ", threshold=" << score_threshold_
+              << ", pass_threshold=" << (pass_threshold ? "true" : "false")
+              << ", mapped=" << toString(mapped_type)
+              << ", valid=" << (result.valid ? "true" : "false")
               << "\n";
-
-    if (best_prob < score_threshold_) {
-        return result;
-    }
-
-    result.type = mapped_type;
-
-    if (result.type != GestureType::None) {
-        std::cout << "[手势事件] " << gestureActionLabel(result.type)
-                  << "，class_" << class_id << "(" << gestureClassLabel(class_id) << ")\n";
-    }
 
     return result;
 }
@@ -256,9 +257,9 @@ GestureResult GestureModel::fallbackInfer(const Frame& frame) {
     }
     if (infer_count_ == 5) {
         result.valid = true;
-        result.type = GestureType::Heart;
+        result.type = GestureType::Confirm;
         result.score = 0.97F;
-        result.gesture_name = "heart";
+        result.gesture_name = "confirm";
         return result;
     }
     if (infer_count_ == 12) {

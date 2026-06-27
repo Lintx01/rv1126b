@@ -21,10 +21,11 @@
 namespace {
 
 constexpr std::size_t kGestureClassCount = 15;
-constexpr std::size_t kStartClassId = 5;
-constexpr std::size_t kStopClassId = 6;
-constexpr std::size_t kHeartClassId = 12;
-constexpr std::size_t kLikeClassId = 13;
+constexpr std::size_t kStartClassId = 6;
+constexpr std::size_t kStopClassId = 5;
+constexpr std::size_t kConfirmOkClassId = 10;
+constexpr std::size_t kRockClassId = 12;
+constexpr std::size_t kConfirmThumbClassId = 13;
 constexpr const char* kDefaultGestureModelPath = "model/yolov5_gesture_rv1126b.rknn";
 constexpr const char* kRgbDebugPath = "/tmp/gesture_input_rgb_debug.jpg";
 constexpr const char* kBgrDebugPath = "/tmp/gesture_input_bgr_debug.jpg";
@@ -41,10 +42,10 @@ const char* gestureTypeToText(rv1126b::GestureType type) {
             return "Start";
         case rv1126b::GestureType::Stop:
             return "Stop";
-        case rv1126b::GestureType::Heart:
-            return "Heart";
-        case rv1126b::GestureType::Like:
-            return "Like";
+        case rv1126b::GestureType::Confirm:
+            return "Confirm";
+        case rv1126b::GestureType::Rock:
+            return "Rock";
         case rv1126b::GestureType::None:
         default:
             return "None";
@@ -58,11 +59,11 @@ rv1126b::GestureType mapClassToGesture(std::size_t class_id) {
     if (class_id == kStopClassId) {
         return rv1126b::GestureType::Stop;
     }
-    if (class_id == kHeartClassId) {
-        return rv1126b::GestureType::Heart;
+    if (class_id == kConfirmOkClassId || class_id == kConfirmThumbClassId) {
+        return rv1126b::GestureType::Confirm;
     }
-    if (class_id == kLikeClassId) {
-        return rv1126b::GestureType::Like;
+    if (class_id == kRockClassId) {
+        return rv1126b::GestureType::Rock;
     }
     return rv1126b::GestureType::None;
 }

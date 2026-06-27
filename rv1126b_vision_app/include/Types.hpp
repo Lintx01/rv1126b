@@ -15,8 +15,8 @@ enum class GestureType {
     None,
     Start,
     Stop,
-    Heart,
-    Like
+    Confirm,
+    Rock
 };
 
 enum class SystemState {
@@ -60,6 +60,10 @@ enum class DisplayFace {
     DrinkRemindFace,
     DrinkOkFace,
     GestureOkFace,
+    StartFace,
+    StopFace,
+    ConfirmFace,
+    RockFace,
     IdleClock,
     SleepFace,
     ErrorFace,
@@ -68,6 +72,10 @@ enum class DisplayFace {
     DRINK_REMIND_FACE = DrinkRemindFace,
     DRINK_OK_FACE = DrinkOkFace,
     GESTURE_OK_FACE = GestureOkFace,
+    START_FACE = StartFace,
+    STOP_FACE = StopFace,
+    CONFIRM_FACE = ConfirmFace,
+    ROCK_FACE = RockFace,
     IDLE_CLOCK = IdleClock,
     SLEEP_FACE = SleepFace,
     ERROR_FACE = ErrorFace
@@ -160,6 +168,9 @@ struct AppConfig {
     bool use_legacy_posture_drink_model{true};
     bool use_three_model_pipeline{false};
     float gesture_score_threshold{0.60F};
+    int gesture_stable_required{2};
+    int gesture_trigger_cooldown_ms{1500};
+    bool gesture_require_release{true};
     int pose_interval_ms{150};
     int gesture_interval_ms{300};
     int cup_interval_ms{500};
@@ -386,6 +397,14 @@ inline const char* toString(DisplayFace face) {
             return "drink_ok_face";
         case DisplayFace::GestureOkFace:
             return "gesture_ok_face";
+        case DisplayFace::StartFace:
+            return "start_face";
+        case DisplayFace::StopFace:
+            return "stop_face";
+        case DisplayFace::ConfirmFace:
+            return "confirm_face";
+        case DisplayFace::RockFace:
+            return "rock_face";
         case DisplayFace::IdleClock:
             return "idle_clock";
         case DisplayFace::SleepFace:
@@ -404,10 +423,10 @@ inline const char* toString(GestureType type) {
             return "start";
         case GestureType::Stop:
             return "stop";
-        case GestureType::Heart:
-            return "heart";
-        case GestureType::Like:
-            return "like";
+        case GestureType::Confirm:
+            return "confirm";
+        case GestureType::Rock:
+            return "rock";
     }
     return "unknown";
 }
@@ -442,6 +461,22 @@ inline std::string appStateToJson(const AppState& state) {
 }
 
 inline DisplayFace selectDisplayFace(const AppState& state) {
+    if (state.gesture_triggered) {
+        if (state.gesture_name == "start") {
+            return DisplayFace::StartFace;
+        }
+        if (state.gesture_name == "stop") {
+            return DisplayFace::StopFace;
+        }
+        if (state.gesture_name == "confirm") {
+            return DisplayFace::ConfirmFace;
+        }
+        if (state.gesture_name == "rock") {
+            return DisplayFace::RockFace;
+        }
+        return DisplayFace::GestureOkFace;
+    }
+
     if (state.device_mode == DeviceMode::Standby) {
         return DisplayFace::SleepFace;
     }
@@ -456,10 +491,6 @@ inline DisplayFace selectDisplayFace(const AppState& state) {
 
     if (state.posture_state == PostureState::BadAlert || state.posture_alert) {
         return DisplayFace::BadPostureFace;
-    }
-
-    if (state.gesture_triggered) {
-        return DisplayFace::GestureOkFace;
     }
 
     return DisplayFace::NormalFace;

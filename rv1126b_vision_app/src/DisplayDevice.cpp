@@ -73,6 +73,14 @@ const char* displayFaceToLogString(DisplayFace face) {
             return "DrinkOkFace";
         case DisplayFace::GESTURE_OK_FACE:
             return "GestureOkFace";
+        case DisplayFace::START_FACE:
+            return "StartFace";
+        case DisplayFace::STOP_FACE:
+            return "StopFace";
+        case DisplayFace::CONFIRM_FACE:
+            return "ConfirmFace";
+        case DisplayFace::ROCK_FACE:
+            return "RockFace";
         case DisplayFace::IDLE_CLOCK:
             return "IdleClock";
         case DisplayFace::SLEEP_FACE:
@@ -328,12 +336,128 @@ void DisplayDevice::showFace(DisplayFace face) {
         return;
     }
 
-    /*
-     * 第一版只打通业务状态到显示接口：
-     * GESTURE_OK_FACE 复用已有比心表情；其他表情先日志占位，后续再补真实图案。
-     */
-    if (face == DisplayFace::GESTURE_OK_FACE) {
-        showHeartExpression();
+    auto show_simple_face_page = [&](const char* title, const char* subtitle, uint16_t color) {
+        std::cout << "[Display] " << displayFaceToLogString(face)
+                  << ": " << (title == nullptr ? "" : title)
+                  << " / " << (subtitle == nullptr ? "" : subtitle) << "\n";
+
+#if defined(RV1126B_HAS_LVGL)
+        if (config_.enable_lvgl_display && ensureLvglInitialized()) {
+            clearLvglPage();
+
+            lvgl_ui_->root = lv_obj_create(lv_scr_act());
+            lv_obj_remove_style_all(lvgl_ui_->root);
+            lv_obj_add_style(lvgl_ui_->root, &lvgl_ui_->root_style, 0);
+            lv_obj_set_size(lvgl_ui_->root, config_.st7789_width, config_.st7789_height);
+            lv_obj_center(lvgl_ui_->root);
+            lv_obj_clear_flag(lvgl_ui_->root, LV_OBJ_FLAG_SCROLLABLE);
+
+            lv_obj_t* accent = lv_obj_create(lvgl_ui_->root);
+            lv_obj_remove_style_all(accent);
+            lv_obj_set_size(accent, 86, 86);
+            lv_obj_set_pos(accent, 77, 28);
+            lv_obj_set_style_radius(accent, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(accent, lv_color_make(
+                static_cast<uint8_t>(((color >> 11) & 0x1F) << 3),
+                static_cast<uint8_t>(((color >> 5) & 0x3F) << 2),
+                static_cast<uint8_t>((color & 0x1F) << 3)), 0);
+            lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
+
+            lv_obj_t* title_label = lv_label_create(lvgl_ui_->root);
+            lv_obj_add_style(title_label, &lvgl_ui_->title_style, 0);
+            lv_label_set_text(title_label, title == nullptr ? "" : title);
+            lv_obj_set_pos(title_label, 0, 126);
+            lv_obj_set_size(title_label, config_.st7789_width, 36);
+            lv_obj_set_style_text_align(title_label, LV_TEXT_ALIGN_CENTER, 0);
+
+            lv_obj_t* subtitle_label = lv_label_create(lvgl_ui_->root);
+            lv_obj_add_style(subtitle_label, &lvgl_ui_->status_style, 0);
+            lv_label_set_text(subtitle_label, subtitle == nullptr ? "" : subtitle);
+            lv_obj_set_pos(subtitle_label, 0, 170);
+            lv_obj_set_size(subtitle_label, config_.st7789_width, 32);
+            lv_obj_set_style_text_align(subtitle_label, LV_TEXT_ALIGN_CENTER, 0);
+
+            idle_clock_visible_ = false;
+            (void)lv_timer_handler();
+            return;
+        }
+#endif
+
+        std::array<uint16_t, 16 * 16> pixels{};
+        pixels.fill(0x0000);
+        for (int y = 2; y < 14; ++y) {
+            for (int x = 2; x < 14; ++x) {
+                pixels[static_cast<std::size_t>(y * 16 + x)] = color;
+            }
+        }
+        (void)drawRgb565Bitmap(pixels.data(), 16, 16);
+    };
+
+    if (face == DisplayFace::GESTURE_OK_FACE || face == DisplayFace::CONFIRM_FACE) {
+        show_simple_face_page("OK", "Got it", 0x07E0);
+        return;
+    }
+
+    const char* title = nullptr;
+    const char* subtitle = nullptr;
+    uint16_t color = 0xFFFF;
+    switch (face) {
+        case DisplayFace::START_FACE:
+            title = "START";
+            subtitle = "Monitoring ON";
+            color = 0x07E0;
+            break;
+        case DisplayFace::STOP_FACE:
+            title = "STOP";
+            subtitle = "Standby";
+            color = 0xFBE0;
+            break;
+        case DisplayFace::ROCK_FACE:
+            title = "ROCK";
+            subtitle = "Nice!";
+            color = 0xF81F;
+            break;
+        case DisplayFace::SLEEP_FACE:
+            title = "STANDBY";
+            subtitle = "Sleep";
+            color = 0x8410;
+            break;
+        case DisplayFace::NORMAL_FACE:
+            title = "RUNNING";
+            subtitle = "Monitoring";
+            color = 0x07FF;
+            break;
+        case DisplayFace::BAD_POSTURE_FACE:
+            title = "POSTURE";
+            subtitle = "Sit up";
+            color = 0xF800;
+            break;
+        case DisplayFace::DRINK_REMIND_FACE:
+            title = "DRINK";
+            subtitle = "Water time";
+            color = 0x001F;
+            break;
+        case DisplayFace::DRINK_OK_FACE:
+            title = "DRINK OK";
+            subtitle = "Good";
+            color = 0x07E0;
+            break;
+        case DisplayFace::ERROR_FACE:
+            title = "ERROR";
+            subtitle = "Check logs";
+            color = 0xF800;
+            break;
+        case DisplayFace::IDLE_CLOCK:
+            showIdleClock();
+            return;
+        case DisplayFace::GESTURE_OK_FACE:
+        case DisplayFace::CONFIRM_FACE:
+            break;
+    }
+
+    if (title != nullptr) {
+        show_simple_face_page(title, subtitle, color);
         return;
     }
 

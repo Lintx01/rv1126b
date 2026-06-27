@@ -184,6 +184,8 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    config.lvgl_idle_only_test = false;
+
     rv1126b::VisionApp app(config);
     const int rc = app.run();
     if (rc != 0) {

@@ -144,24 +144,68 @@ void drawRectOnNv12Y(
     }
 }
 
-int countDrawableOverlayBoxes(const Frame& frame, const VisionResult& result, const AppConfig& config) {
-    const int max_boxes = std::max(0, config.video_overlay_max_boxes);
-    int count = 0;
+bool labelContains(const Box& box, const char* token) {
+    return !box.label.empty() && box.label.find(token) != std::string::npos;
+}
+
+bool isPersonOverlayBox(const Box& box) {
+    return labelContains(box, "person");
+}
+
+bool isDrinkOverlayBox(const Box& box) {
+    return labelContains(box, "cup") || labelContains(box, "bottle") || labelContains(box, "wine_glass");
+}
+
+std::vector<Box> selectDisplayOverlayBoxes(const VisionResult& result) {
+    const Box* best_person = nullptr;
+    const Box* best_drink = nullptr;
+
     for (const Box& box : result.boxes) {
-        if (count >= max_boxes) {
-            break;
-        }
-        const int w = static_cast<int>(box.w + 0.5F);
-        const int h = static_cast<int>(box.h + 0.5F);
-        if (w < 2 || h < 2) {
+        if (box.label.empty()) {
             continue;
         }
-        const int x = static_cast<int>(box.x + 0.5F);
-        const int y = static_cast<int>(box.y + 0.5F);
-        if (x >= frame.width || y >= frame.height || (x + w) <= 0 || (y + h) <= 0) {
+        if (isPersonOverlayBox(box)) {
+            if (best_person == nullptr || box.score > best_person->score) {
+                best_person = &box;
+            }
             continue;
         }
-        ++count;
+        if (isDrinkOverlayBox(box)) {
+            if (best_drink == nullptr || box.score > best_drink->score) {
+                best_drink = &box;
+            }
+        }
+    }
+
+    std::vector<Box> selected;
+    selected.reserve(2);
+    if (best_person != nullptr) {
+        selected.push_back(*best_person);
+    }
+    if (best_drink != nullptr) {
+        selected.push_back(*best_drink);
+    }
+    return selected;
+}
+
+bool isDrawableOverlayBox(const Frame& frame, const Box& box) {
+    const int w = static_cast<int>(box.w + 0.5F);
+    const int h = static_cast<int>(box.h + 0.5F);
+    if (w < 2 || h < 2) {
+        return false;
+    }
+    const int x = static_cast<int>(box.x + 0.5F);
+    const int y = static_cast<int>(box.y + 0.5F);
+    return !(x >= frame.width || y >= frame.height || (x + w) <= 0 || (y + h) <= 0);
+}
+
+int countDrawableOverlayBoxes(const Frame& frame, const VisionResult& result, const AppConfig& config) {
+    (void)config;
+    int count = 0;
+    for (const Box& box : selectDisplayOverlayBoxes(result)) {
+        if (isDrawableOverlayBox(frame, box)) {
+            ++count;
+        }
     }
     return count;
 }
@@ -178,24 +222,18 @@ bool applyLightweightOverlay(Frame& frame, const VisionResult& result, const App
         std::cout << "[Overlay] lightweight NV12 Y-plane overlay enabled\n";
     }
 
-    const int max_boxes = std::max(0, config.video_overlay_max_boxes);
-    const int thickness = std::max(1, config.video_overlay_thickness);
+    const int base_thickness = std::max(1, config.video_overlay_thickness);
     int drawn = 0;
-    for (const Box& box : result.boxes) {
-        if (drawn >= max_boxes) {
-            break;
-        }
+    for (const Box& box : selectDisplayOverlayBoxes(result)) {
         const int x = static_cast<int>(box.x + 0.5F);
         const int y = static_cast<int>(box.y + 0.5F);
         const int w = static_cast<int>(box.w + 0.5F);
         const int h = static_cast<int>(box.h + 0.5F);
-        if (w < 2 || h < 2) {
-            continue;
-        }
-        if (x >= frame.width || y >= frame.height || (x + w) <= 0 || (y + h) <= 0) {
+        if (!isDrawableOverlayBox(frame, box)) {
             continue;
         }
 
+        const int thickness = isDrinkOverlayBox(box) ? base_thickness + 1 : base_thickness;
         drawRectOnNv12Y(frame, x, y, w, h, 235U, thickness);
         if (w > (thickness * 2 + 2) && h > (thickness * 2 + 2)) {
             drawRectOnNv12Y(frame, x + thickness, y + thickness, w - thickness * 2, h - thickness * 2, 40U, 1);
@@ -528,6 +566,11 @@ bool VisionApp::start() {
                   << ", pose_keypoint=" << config_.pose_keypoint_score_threshold
                   << ", drink_distance_norm=" << config_.drink_distance_norm_threshold
                   << ", drink_consecutive_hits=" << config_.drink_consecutive_hits << "\n";
+        std::cout << std::fixed << std::setprecision(3)
+                  << "[Config] gesture_score_threshold=" << config_.gesture_score_threshold << "\n";
+        std::cout << "[Config] gesture_stable_required=" << config_.gesture_stable_required << "\n";
+        std::cout << "[Config] gesture_trigger_cooldown_ms=" << config_.gesture_trigger_cooldown_ms << "\n";
+        std::cout << "[Config] gesture_require_release=" << (config_.gesture_require_release ? "true" : "false") << "\n";
 
         if (!image_processor_.open(config_)) {
             throw std::runtime_error("image processor open failed");
@@ -768,7 +811,8 @@ void VisionApp::encoderLoop() {
                         if (overlay_applied) {
                             frame_to_encode = &overlay_frame;
                             if ((frame_id % 300U) == 0U) {
-                                std::cout << "[Overlay] lightweight enabled, boxes=" << overlay_box_count
+                                std::cout << "[Overlay] lightweight enabled, display_boxes=" << overlay_box_count
+                                          << ", raw_boxes=" << latest_result.boxes.size()
                                           << ", frame=" << frame_id << "\n";
                             }
                         }
@@ -796,6 +840,92 @@ void VisionApp::aiLoop() {
     bool has_cup_result = false;
     uint64_t last_ai_buffer_version = 0;
     uint64_t last_ai_frame_id = 0;
+    GestureType pending_gesture_type = GestureType::None;
+    int pending_gesture_count = 0;
+    GestureType locked_gesture_type = GestureType::None;
+    int64_t last_gesture_trigger_ms = 0;
+
+    auto triggerStableGesture = [&](const GestureResult& gesture_result) {
+        const int required_count = std::max(1, config_.gesture_stable_required);
+        const int cooldown_ms = std::max(0, config_.gesture_trigger_cooldown_ms);
+        const GestureType candidate = gesture_result.valid ? gesture_result.type : GestureType::None;
+
+        if (candidate == GestureType::None) {
+            pending_gesture_type = GestureType::None;
+            pending_gesture_count = 0;
+            if (config_.gesture_require_release) {
+                locked_gesture_type = GestureType::None;
+            }
+            std::cout << "[手势稳定] frame=" << gesture_result.frame_id
+                      << ", candidate=none, count=0/" << required_count
+                      << ", action=reset\n";
+            return;
+        }
+
+        if (candidate == pending_gesture_type) {
+            pending_gesture_count = std::min(pending_gesture_count + 1, required_count);
+        } else {
+            pending_gesture_type = candidate;
+            pending_gesture_count = 1;
+            if (config_.gesture_require_release && locked_gesture_type != GestureType::None && locked_gesture_type != candidate) {
+                locked_gesture_type = GestureType::None;
+            }
+        }
+
+        if (pending_gesture_count < required_count) {
+            std::cout << "[手势稳定] frame=" << gesture_result.frame_id
+                      << ", candidate=" << toString(candidate)
+                      << ", count=" << pending_gesture_count << "/" << required_count
+                      << ", action=waiting\n";
+            return;
+        }
+
+        const int64_t now_ms = steadyMs();
+        if (last_gesture_trigger_ms > 0 && (now_ms - last_gesture_trigger_ms) < cooldown_ms) {
+            std::cout << "[手势稳定] frame=" << gesture_result.frame_id
+                      << ", candidate=" << toString(candidate)
+                      << ", count=" << pending_gesture_count << "/" << required_count
+                      << ", action=cooldown\n";
+            return;
+        }
+
+        if (config_.gesture_require_release && locked_gesture_type == candidate) {
+            std::cout << "[手势稳定] frame=" << gesture_result.frame_id
+                      << ", candidate=" << toString(candidate)
+                      << ", count=" << pending_gesture_count << "/" << required_count
+                      << ", action=locked_wait_release\n";
+            return;
+        }
+
+        switch (candidate) {
+            case GestureType::Start:
+                requestStartByGesture();
+                publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "start");
+                break;
+            case GestureType::Stop:
+                requestStopByGesture();
+                publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "stop");
+                break;
+            case GestureType::Confirm:
+                publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "confirm");
+                break;
+            case GestureType::Rock:
+                publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "rock");
+                break;
+            case GestureType::None:
+                break;
+        }
+
+        last_gesture_trigger_ms = now_ms;
+        if (config_.gesture_require_release) {
+            locked_gesture_type = candidate;
+        }
+        std::cout << "[手势触发] frame=" << gesture_result.frame_id
+                  << ", type=" << toString(candidate)
+                  << ", count=" << pending_gesture_count << "/" << required_count
+                  << ", cooldown_ms=" << cooldown_ms
+                  << ", action=trigger\n";
+    };
 
     while (!exit_requested_) {
         FramePtr frame;
@@ -879,37 +1009,7 @@ void VisionApp::aiLoop() {
                 }
                 perf_.gesture_infer.addSample(elapsedUs(gesture_begin));
 
-                switch (gesture_result.type) {
-                    case GestureType::Start:
-                    {
-                        requestStartByGesture();
-                        publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "start");
-                        break;
-                    }
-                    case GestureType::Stop:
-                    {
-                        requestStopByGesture();
-                        publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "stop");
-                        break;
-                    }
-                    case GestureType::Heart:
-                    {
-                        publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "heart");
-                        break;
-                    }
-                    case GestureType::Like:
-                    {
-                        queueMqttEvent(
-                            config_,
-                            mqtt_queue_,
-                            "gesture_like",
-                            "Like gesture detected",
-                            false);
-                        break;
-                    }
-                    case GestureType::None:
-                        break;
-                }
+                triggerStableGesture(gesture_result);
             }
         }
 
@@ -1310,8 +1410,10 @@ void VisionApp::publishDisplayState(
             queueMqttEvent(config_, mqtt_queue_, "gesture_start", "Start gesture detected", false);
         } else if (gesture_name == "stop") {
             queueMqttEvent(config_, mqtt_queue_, "gesture_stop", "Stop gesture detected", false);
-        } else if (gesture_name == "heart") {
-            queueMqttEvent(config_, mqtt_queue_, "gesture_heart", "Heart gesture detected", false);
+        } else if (gesture_name == "confirm") {
+            queueMqttEvent(config_, mqtt_queue_, "gesture_confirm", "Confirm gesture detected", false);
+        } else if (gesture_name == "rock") {
+            queueMqttEvent(config_, mqtt_queue_, "gesture_rock", "Rock gesture detected", false);
         }
     }
 
