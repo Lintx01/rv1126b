@@ -205,6 +205,9 @@ struct AppConfig {
     int display_timezone_offset_minutes{480};
     int display_tick_ms{5};
     int display_refresh_ms{20};
+    int display_start_stop_ms{3000};
+    int display_confirm_ms{3000};
+    int display_rock_ms{20000};
     bool enable_perf_log{true};
     int perf_log_interval_ms{2000};
     std::string st7789_spi_device{"/dev/spidev0.0"};

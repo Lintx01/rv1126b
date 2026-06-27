@@ -137,6 +137,15 @@ private:
     void createStatusPill();
     void createBreathingDot();
     void updateIdleClock(bool force);
+    void startFaceAnimation(DisplayFace face);
+    void updateFaceAnimation();
+    void updateRunningAnimation(int elapsed_ms);
+    void updateStartAnimation(int elapsed_ms);
+    void updateStopAnimation(int elapsed_ms);
+    void updateConfirmAnimation(int elapsed_ms);
+    void updateRockAnimation(int elapsed_ms);
+    bool isAnimatedFace(DisplayFace face) const;
+    int animationElapsedMs() const;
     bool resetPanel();
     bool initPanel();
     bool drawRgb565Bitmap(const uint16_t* pixels, int width, int height);
@@ -152,6 +161,11 @@ private:
     bool lvgl_time_warning_printed_{false};
     bool lvgl_time_status_printed_{false};
     bool idle_clock_visible_{false};
+    DisplayFace current_face_{DisplayFace::IDLE_CLOCK};
+    int64_t face_show_start_ms_{0};
+    int64_t last_anim_update_ms_{0};
+    bool animation_active_{false};
+    bool rock_settled_logged_{false};
     int64_t lvgl_last_tick_ms_{0};
     int64_t idle_clock_last_update_ms_{0};
     int idle_clock_last_second_{-1};

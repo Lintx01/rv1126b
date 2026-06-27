@@ -266,6 +266,66 @@ std::string mqttTopic(const AppConfig& config, const char* leaf) {
     return config.mqtt_base_topic + "/" + leaf;
 }
 
+bool isTransientDisplayFace(DisplayFace face) {
+    return face == DisplayFace::START_FACE || face == DisplayFace::STOP_FACE ||
+           face == DisplayFace::CONFIRM_FACE || face == DisplayFace::ROCK_FACE ||
+           face == DisplayFace::GESTURE_OK_FACE;
+}
+
+bool isBaseDisplayFace(DisplayFace face) {
+    return face == DisplayFace::NORMAL_FACE || face == DisplayFace::IDLE_CLOCK ||
+           face == DisplayFace::SLEEP_FACE || face == DisplayFace::BAD_POSTURE_FACE ||
+           face == DisplayFace::DRINK_REMIND_FACE || face == DisplayFace::DRINK_OK_FACE;
+}
+
+const char* displayStateLogName(DisplayFace face) {
+    switch (face) {
+        case DisplayFace::START_FACE:
+            return "start";
+        case DisplayFace::STOP_FACE:
+            return "stop";
+        case DisplayFace::CONFIRM_FACE:
+        case DisplayFace::GESTURE_OK_FACE:
+            return "confirm";
+        case DisplayFace::ROCK_FACE:
+            return "rock";
+        case DisplayFace::NORMAL_FACE:
+            return "normal";
+        case DisplayFace::IDLE_CLOCK:
+            return "idle_clock";
+        case DisplayFace::SLEEP_FACE:
+            return "sleep";
+        case DisplayFace::BAD_POSTURE_FACE:
+            return "bad_posture";
+        case DisplayFace::DRINK_REMIND_FACE:
+            return "drink_remind";
+        case DisplayFace::DRINK_OK_FACE:
+            return "drink_ok";
+        case DisplayFace::ERROR_FACE:
+            return "error";
+    }
+    return "unknown";
+}
+
+int transientDisplayDurationMs(DisplayFace face, const AppConfig& config) {
+    switch (face) {
+        case DisplayFace::START_FACE:
+        case DisplayFace::STOP_FACE:
+            return std::max(0, config.display_start_stop_ms);
+        case DisplayFace::CONFIRM_FACE:
+        case DisplayFace::GESTURE_OK_FACE:
+            return std::max(0, config.display_confirm_ms);
+        case DisplayFace::ROCK_FACE:
+            return std::max(0, config.display_rock_ms);
+        default:
+            return 0;
+    }
+}
+
+DisplayFace baseDisplayFaceForState(SystemState state) {
+    return state == SystemState::Running ? DisplayFace::NORMAL_FACE : DisplayFace::IDLE_CLOCK;
+}
+
 const char* mqttStateString(const AppState& state) {
     if (state.display_face == DisplayFace::ERROR_FACE) {
         return "error";
@@ -631,6 +691,12 @@ bool VisionApp::start() {
         g_signal_exit_requested = false;
         resetMqttRuntimeState();
         resetLatestVisionResult();
+
+        const DisplayFace initial_face = baseDisplayFaceForState(state_.load());
+        if (!display_queue_.push(initial_face)) {
+            std::cerr << "[DisplayState][WARN] initial display queue push failed\n";
+        }
+        std::cout << "[DisplayState] initial face=" << displayStateLogName(initial_face) << "\n";
 
         camera_thread_ = std::thread(&VisionApp::runThread, this, "camera", [this] { cameraLoop(); });
         if (shouldRunEncoderPipeline()) {
@@ -1267,13 +1333,43 @@ void VisionApp::mqttLoop() {
 }
 
 void VisionApp::displayLoop() {
+    bool has_transient_display = false;
+    int64_t transient_display_until_ms = 0;
+
+    auto show_face = [&](DisplayFace face) {
+        const auto display_begin = std::chrono::steady_clock::now();
+        display_.showFace(face);
+        perf_.display_show.addSample(elapsedUs(display_begin));
+    };
+
     display_.tick();
     while (!exit_requested_) {
+        const int64_t loop_now_ms = nowMs();
+        if (has_transient_display && loop_now_ms >= transient_display_until_ms) {
+            has_transient_display = false;
+            const DisplayFace back_to = baseDisplayFaceForState(state_.load());
+            std::cout << "[DisplayState] transient expired, back_to=" << displayStateLogName(back_to) << "\n";
+            show_face(back_to);
+        }
+
         auto item = display_queue_.popFor(std::chrono::milliseconds(200));
         if (item.has_value()) {
-            const auto display_begin = std::chrono::steady_clock::now();
-            display_.showFace(*item);
-            perf_.display_show.addSample(elapsedUs(display_begin));
+            const DisplayFace face = *item;
+            const int64_t now_ms = nowMs();
+            if (isTransientDisplayFace(face)) {
+                const int duration_ms = transientDisplayDurationMs(face, config_);
+                has_transient_display = duration_ms > 0;
+                transient_display_until_ms = now_ms + duration_ms;
+                std::cout << "[DisplayState] transient face=" << displayStateLogName(face)
+                          << " duration_ms=" << duration_ms << "\n";
+                show_face(face);
+            } else if (has_transient_display && now_ms < transient_display_until_ms && isBaseDisplayFace(face)) {
+                std::cout << "[DisplayState] skip face=" << displayStateLogName(face)
+                          << " because transient active\n";
+            } else {
+                has_transient_display = false;
+                show_face(face);
+            }
         }
         display_.tick();
     }

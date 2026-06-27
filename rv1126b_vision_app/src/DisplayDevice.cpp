@@ -192,6 +192,13 @@ struct DisplayDevice::LvglUiState {
     lv_obj_t* status_pill{nullptr};
     lv_obj_t* status_label{nullptr};
     lv_obj_t* breathing_dot{nullptr};
+    lv_obj_t* accent_obj{nullptr};
+    lv_obj_t* face_label{nullptr};
+    lv_obj_t* detail_label{nullptr};
+    lv_obj_t* anim_arc{nullptr};
+    lv_obj_t* dot_one{nullptr};
+    lv_obj_t* dot_two{nullptr};
+    lv_obj_t* dot_three{nullptr};
 
     lv_style_t root_style;
     lv_style_t title_style;
@@ -261,6 +268,14 @@ void breathingDotAnim(void* object, int32_t value) {
     lv_obj_set_style_shadow_opa(dot, static_cast<lv_opa_t>(value), 0);
 }
 
+void setDotOpa(lv_obj_t* dot, lv_opa_t opa) {
+    if (dot == nullptr) {
+        return;
+    }
+    lv_obj_set_style_bg_opa(dot, opa, 0);
+    lv_obj_set_style_shadow_opa(dot, opa > LV_OPA_50 ? LV_OPA_50 : LV_OPA_10, 0);
+}
+
 }  // namespace
 #endif
 
@@ -305,11 +320,7 @@ bool DisplayDevice::open(const AppConfig& config) {
 #endif
 
     /*
-     * ST7789 初始化顺序保持不变：
-     * 1. 打开 SPI，配置 mode=0、bits=8、speed_hz。
-     * 2. 配置 DC/RESET/BL GPIO。
-     * 3. 发送 SLPOUT、COLMOD、MADCTL、INVON/INVOFF、DISPON。
-     * 4. 显示时发送 CASET/RASET/RAMWR，再写 RGB565 像素。
+     * Keep the ST7789 init sequence unchanged: SPI, GPIO, SLPOUT/COLMOD/MADCTL, then DISPON.
      */
     opened_ = resetPanel() && initPanel();
     if (opened_) {
@@ -326,7 +337,7 @@ void DisplayDevice::showFace(DisplayFace face) {
         if (face == DisplayFace::IDLE_CLOCK) {
             showIdleClock();
         } else {
-            std::cout << "[Display][LVGL] 空闲时钟测试模式：忽略表情事件\n";
+            std::cout << "[Display][LVGL] idle-only mode: ignore face event\n";
         }
         return;
     }
@@ -353,6 +364,7 @@ void DisplayDevice::showFace(DisplayFace face) {
             lv_obj_clear_flag(lvgl_ui_->root, LV_OBJ_FLAG_SCROLLABLE);
 
             lv_obj_t* accent = lv_obj_create(lvgl_ui_->root);
+            lvgl_ui_->accent_obj = accent;
             lv_obj_remove_style_all(accent);
             lv_obj_set_size(accent, 86, 86);
             lv_obj_set_pos(accent, 77, 28);
@@ -365,6 +377,7 @@ void DisplayDevice::showFace(DisplayFace face) {
             lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
 
             lv_obj_t* title_label = lv_label_create(lvgl_ui_->root);
+            lvgl_ui_->face_label = title_label;
             lv_obj_add_style(title_label, &lvgl_ui_->title_style, 0);
             lv_label_set_text(title_label, title == nullptr ? "" : title);
             lv_obj_set_pos(title_label, 0, 126);
@@ -372,13 +385,41 @@ void DisplayDevice::showFace(DisplayFace face) {
             lv_obj_set_style_text_align(title_label, LV_TEXT_ALIGN_CENTER, 0);
 
             lv_obj_t* subtitle_label = lv_label_create(lvgl_ui_->root);
+            lvgl_ui_->detail_label = subtitle_label;
             lv_obj_add_style(subtitle_label, &lvgl_ui_->status_style, 0);
             lv_label_set_text(subtitle_label, subtitle == nullptr ? "" : subtitle);
             lv_obj_set_pos(subtitle_label, 0, 170);
             lv_obj_set_size(subtitle_label, config_.st7789_width, 32);
             lv_obj_set_style_text_align(subtitle_label, LV_TEXT_ALIGN_CENTER, 0);
 
+            lvgl_ui_->anim_arc = lv_arc_create(lvgl_ui_->root);
+            lv_obj_remove_style_all(lvgl_ui_->anim_arc);
+            lv_obj_add_style(lvgl_ui_->anim_arc, &lvgl_ui_->arc_style, LV_PART_MAIN);
+            lv_obj_add_style(lvgl_ui_->anim_arc, &lvgl_ui_->arc_indicator_style, LV_PART_INDICATOR);
+            lv_obj_set_size(lvgl_ui_->anim_arc, 112, 112);
+            lv_obj_set_pos(lvgl_ui_->anim_arc, 64, 15);
+            lv_arc_set_range(lvgl_ui_->anim_arc, 0, 100);
+            lv_arc_set_value(lvgl_ui_->anim_arc, 0);
+            lv_arc_set_rotation(lvgl_ui_->anim_arc, 270);
+            lv_arc_set_bg_angles(lvgl_ui_->anim_arc, 0, 360);
+            lv_obj_remove_style(lvgl_ui_->anim_arc, nullptr, LV_PART_KNOB);
+            lv_obj_clear_flag(lvgl_ui_->anim_arc, LV_OBJ_FLAG_CLICKABLE);
+
+            auto create_dot = [&](int x) -> lv_obj_t* {
+                lv_obj_t* dot = lv_obj_create(lvgl_ui_->root);
+                lv_obj_remove_style_all(dot);
+                lv_obj_add_style(dot, &lvgl_ui_->dot_style, 0);
+                lv_obj_set_size(dot, 8, 8);
+                lv_obj_set_pos(dot, x, 212);
+                lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+                return dot;
+            };
+            lvgl_ui_->dot_one = create_dot(96);
+            lvgl_ui_->dot_two = create_dot(116);
+            lvgl_ui_->dot_three = create_dot(136);
+
             idle_clock_visible_ = false;
+            startFaceAnimation(face);
             (void)lv_timer_handler();
             return;
         }
@@ -465,7 +506,8 @@ void DisplayDevice::showFace(DisplayFace face) {
 }
 
 void DisplayDevice::tick() {
-    if (!config_.enable_display || !config_.enable_lvgl_display || !config_.lvgl_idle_only_test) {
+    if (!config_.enable_display || !config_.enable_lvgl_display ||
+        (!config_.lvgl_idle_only_test && !idle_clock_visible_ && !animation_active_)) {
         return;
     }
 
@@ -485,6 +527,7 @@ void DisplayDevice::tick() {
     }
 
     updateIdleClock(false);
+    updateFaceAnimation();
     (void)lv_timer_handler();
 #else
     if (!lvgl_compile_warning_printed_) {
@@ -504,6 +547,8 @@ void DisplayDevice::showIdleClock() {
         return;
     }
     updateIdleClock(true);
+    idle_clock_visible_ = true;
+    startFaceAnimation(DisplayFace::IDLE_CLOCK);
     (void)lv_timer_handler();
 #else
     if (!lvgl_compile_warning_printed_) {
@@ -522,10 +567,7 @@ void DisplayDevice::showHeartExpression() {
         return;
     }
 
-    /*
-     * 保留已有比心表情接口。
-     * 真实项目建议把 240x240 PNG 离线转换成 RGB565 数组，这里仍用 16x16 示例图案。
-     */
+    /* Keep the legacy small RGB565 heart demo path. */
     std::array<uint16_t, 16 * 16> pixels{};
     pixels.fill(0x0000);
     for (int y = 3; y < 13; ++y) {
@@ -610,11 +652,11 @@ bool DisplayDevice::ensureLvglInitialized() {
     std::cout << "[Display][LVGL] enabled, resolution="
               << config_.st7789_width << "x" << config_.st7789_height << "\n";
     if (config_.lvgl_idle_only_test) {
-        std::cout << "[Display][LVGL] 空闲时钟测试模式\n";
+        std::cout << "[Display][LVGL] idle clock test mode\n";
     }
-    std::cout << "[Display][LVGL] show IdleClock\n";
     updateIdleClock(true);
     idle_clock_visible_ = true;
+    startFaceAnimation(DisplayFace::IDLE_CLOCK);
     return true;
 #else
     if (!lvgl_compile_warning_printed_) {
@@ -647,6 +689,13 @@ void DisplayDevice::clearLvglPage() {
     lvgl_ui_->status_pill = nullptr;
     lvgl_ui_->status_label = nullptr;
     lvgl_ui_->breathing_dot = nullptr;
+    lvgl_ui_->accent_obj = nullptr;
+    lvgl_ui_->face_label = nullptr;
+    lvgl_ui_->detail_label = nullptr;
+    lvgl_ui_->anim_arc = nullptr;
+    lvgl_ui_->dot_one = nullptr;
+    lvgl_ui_->dot_two = nullptr;
+    lvgl_ui_->dot_three = nullptr;
 #endif
 }
 
@@ -825,8 +874,8 @@ void DisplayDevice::createIdleClockPage() {
 
     createStatusPill();
     createBreathingDot();
-    std::cout << "[Display][Clock] 使用北京时间 UTC+8，屏幕时区偏移="
-              << config_.display_timezone_offset_minutes << " 分钟\n";
+    std::cout << "[Display][Clock] UTC+8 display offset_minutes="
+              << config_.display_timezone_offset_minutes << "\n";
     std::cout << "[Display][LVGL] create IdleClock page\n";
 #endif
 }
@@ -850,7 +899,7 @@ void DisplayDevice::updateIdleClock(bool force) {
         utcOffsetTime(config_.display_timezone_offset_minutes, tm_now) && (tm_now.tm_year + 1900) >= 2024;
     if (!time_ok) {
         if (!lvgl_time_warning_printed_) {
-            std::cout << "[Display][LVGL] 系统时间可能尚未同步，无法显示北京时间\n";
+            std::cout << "[Display][LVGL] system time is not ready for clock display\n";
             lvgl_time_warning_printed_ = true;
         }
         lv_label_set_text(lvgl_ui_->time_label, "--:--");
@@ -876,7 +925,7 @@ void DisplayDevice::updateIdleClock(bool force) {
         tm_now.tm_mon + 1,
         tm_now.tm_mday);
     if (!lvgl_time_status_printed_) {
-        std::cout << "[Display][Clock] 当前计算北京时间=" << date_text << " " << time_text
+        std::cout << "[Display][Clock] current_display_time=" << date_text << " " << time_text
                   << ":" << (tm_now.tm_sec < 10 ? "0" : "") << tm_now.tm_sec
                   << ", offset_minutes=" << config_.display_timezone_offset_minutes << "\n";
         lvgl_time_status_printed_ = true;
@@ -891,8 +940,202 @@ void DisplayDevice::updateIdleClock(bool force) {
 #endif
 }
 
+bool DisplayDevice::isAnimatedFace(DisplayFace face) const {
+    switch (face) {
+        case DisplayFace::IDLE_CLOCK:
+        case DisplayFace::NORMAL_FACE:
+        case DisplayFace::START_FACE:
+        case DisplayFace::STOP_FACE:
+        case DisplayFace::CONFIRM_FACE:
+        case DisplayFace::GESTURE_OK_FACE:
+        case DisplayFace::ROCK_FACE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+int DisplayDevice::animationElapsedMs() const {
+    if (face_show_start_ms_ <= 0) {
+        return 0;
+    }
+    return static_cast<int>(std::max<int64_t>(0, steadyMs() - face_show_start_ms_));
+}
+
+void DisplayDevice::startFaceAnimation(DisplayFace face) {
+    current_face_ = face;
+    face_show_start_ms_ = steadyMs();
+    last_anim_update_ms_ = 0;
+    animation_active_ = isAnimatedFace(face);
+    rock_settled_logged_ = false;
+
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ != nullptr && lvgl_ui_->anim_arc != nullptr) {
+        lv_arc_set_value(lvgl_ui_->anim_arc, 0);
+    }
+#endif
+
+    if (face == DisplayFace::IDLE_CLOCK) {
+        std::cout << "[Display][LVGL] show IdleClock animated\n";
+    } else if (face == DisplayFace::NORMAL_FACE) {
+        std::cout << "[Display][LVGL] show NormalFace animated\n";
+    } else if (face == DisplayFace::START_FACE) {
+        std::cout << "[Display][LVGL] show StartFace animated\n";
+    } else if (face == DisplayFace::STOP_FACE) {
+        std::cout << "[Display][LVGL] show StopFace animated\n";
+    } else if (face == DisplayFace::CONFIRM_FACE || face == DisplayFace::GESTURE_OK_FACE) {
+        std::cout << "[Display][LVGL] show ConfirmFace animated\n";
+    } else if (face == DisplayFace::ROCK_FACE) {
+        std::cout << "[Display][LVGL] show RockFace animated\n";
+    }
+}
+
+void DisplayDevice::updateFaceAnimation() {
+#if defined(RV1126B_HAS_LVGL)
+    if (!animation_active_ || lvgl_ui_ == nullptr) {
+        return;
+    }
+
+    const int64_t now_ms = steadyMs();
+    const int elapsed_ms = animationElapsedMs();
+    const bool idle_clock = current_face_ == DisplayFace::IDLE_CLOCK;
+    const int64_t interval_ms = idle_clock ? 1000 : 120;
+    if (last_anim_update_ms_ > 0 && (now_ms - last_anim_update_ms_) < interval_ms) {
+        return;
+    }
+    last_anim_update_ms_ = now_ms;
+
+
+    if (current_face_ == DisplayFace::IDLE_CLOCK) {
+        return;
+    }
+
+    if (current_face_ == DisplayFace::NORMAL_FACE) {
+        updateRunningAnimation(elapsed_ms);
+        return;
+    }
+
+    if (current_face_ == DisplayFace::START_FACE) {
+        updateStartAnimation(elapsed_ms);
+        return;
+    }
+
+    if (current_face_ == DisplayFace::STOP_FACE) {
+        updateStopAnimation(elapsed_ms);
+        return;
+    }
+
+    if (current_face_ == DisplayFace::CONFIRM_FACE || current_face_ == DisplayFace::GESTURE_OK_FACE) {
+        updateConfirmAnimation(elapsed_ms);
+        return;
+    }
+
+    if (current_face_ == DisplayFace::ROCK_FACE) {
+        updateRockAnimation(elapsed_ms);
+        return;
+    }
+#else
+    (void)this;
+#endif
+}
+void DisplayDevice::updateRunningAnimation(int elapsed_ms) {
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ != nullptr && lvgl_ui_->anim_arc != nullptr) {
+        lv_arc_set_value(lvgl_ui_->anim_arc, static_cast<int>((elapsed_ms / 20) % 101));
+    }
+    const int phase = static_cast<int>((elapsed_ms / 300) % 3);
+    if (lvgl_ui_ != nullptr) {
+        setDotOpa(lvgl_ui_->dot_one, phase == 0 ? LV_OPA_COVER : LV_OPA_30);
+        setDotOpa(lvgl_ui_->dot_two, phase == 1 ? LV_OPA_COVER : LV_OPA_30);
+        setDotOpa(lvgl_ui_->dot_three, phase == 2 ? LV_OPA_COVER : LV_OPA_30);
+    }
+#else
+    (void)elapsed_ms;
+#endif
+}
+
+void DisplayDevice::updateStartAnimation(int elapsed_ms) {
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ != nullptr && lvgl_ui_->anim_arc != nullptr) {
+        lv_arc_set_value(lvgl_ui_->anim_arc, std::min(100, elapsed_ms / 30));
+    }
+    const int phase = static_cast<int>((elapsed_ms / 180) % 3);
+    if (lvgl_ui_ != nullptr) {
+        setDotOpa(lvgl_ui_->dot_one, phase == 0 ? LV_OPA_COVER : LV_OPA_30);
+        setDotOpa(lvgl_ui_->dot_two, phase == 1 ? LV_OPA_COVER : LV_OPA_30);
+        setDotOpa(lvgl_ui_->dot_three, phase == 2 ? LV_OPA_COVER : LV_OPA_30);
+    }
+#else
+    (void)elapsed_ms;
+#endif
+}
+
+void DisplayDevice::updateStopAnimation(int elapsed_ms) {
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ != nullptr && lvgl_ui_->anim_arc != nullptr) {
+        lv_arc_set_value(lvgl_ui_->anim_arc, std::max(0, 100 - elapsed_ms / 30));
+    }
+    const int y_offset = static_cast<int>((elapsed_ms / 300) % 2) * 3;
+    if (lvgl_ui_ != nullptr && lvgl_ui_->accent_obj != nullptr) {
+        lv_obj_set_y(lvgl_ui_->accent_obj, 28 + y_offset);
+    }
+#else
+    (void)elapsed_ms;
+#endif
+}
+
+void DisplayDevice::updateConfirmAnimation(int elapsed_ms) {
+#if defined(RV1126B_HAS_LVGL)
+    if (lvgl_ui_ != nullptr && lvgl_ui_->anim_arc != nullptr) {
+        const int wave = static_cast<int>((elapsed_ms / 25) % 100);
+        lv_arc_set_value(lvgl_ui_->anim_arc, wave < 50 ? wave * 2 : (100 - wave) * 2);
+    }
+    if (lvgl_ui_ != nullptr) {
+        setDotOpa(lvgl_ui_->dot_one, LV_OPA_30);
+        setDotOpa(lvgl_ui_->dot_two, LV_OPA_COVER);
+        setDotOpa(lvgl_ui_->dot_three, LV_OPA_30);
+    }
+#else
+    (void)elapsed_ms;
+#endif
+}
+
+void DisplayDevice::updateRockAnimation(int elapsed_ms) {
+#if defined(RV1126B_HAS_LVGL)
+    if (elapsed_ms >= 5000) {
+        if (!rock_settled_logged_) {
+            if (lvgl_ui_ != nullptr && lvgl_ui_->anim_arc != nullptr) {
+                lv_arc_set_value(lvgl_ui_->anim_arc, 100);
+            }
+            if (lvgl_ui_ != nullptr) {
+                setDotOpa(lvgl_ui_->dot_one, LV_OPA_30);
+                setDotOpa(lvgl_ui_->dot_two, LV_OPA_COVER);
+                setDotOpa(lvgl_ui_->dot_three, LV_OPA_30);
+            }
+            std::cout << "[Display][LVGL] Rock animation settle\n";
+            rock_settled_logged_ = true;
+        }
+        return;
+    }
+    if (lvgl_ui_ != nullptr && lvgl_ui_->anim_arc != nullptr) {
+        lv_arc_set_value(lvgl_ui_->anim_arc, static_cast<int>((elapsed_ms / 50) % 101));
+    }
+    if (lvgl_ui_ != nullptr && lvgl_ui_->accent_obj != nullptr) {
+        const int x_offset = (static_cast<int>((elapsed_ms / 250) % 3) - 1) * 3;
+        lv_obj_set_x(lvgl_ui_->accent_obj, 77 + x_offset);
+    }
+    const int phase = static_cast<int>((elapsed_ms / 160) % 3);
+    if (lvgl_ui_ != nullptr) {
+        setDotOpa(lvgl_ui_->dot_one, phase == 0 ? LV_OPA_COVER : LV_OPA_30);
+        setDotOpa(lvgl_ui_->dot_two, phase == 1 ? LV_OPA_COVER : LV_OPA_30);
+        setDotOpa(lvgl_ui_->dot_three, phase == 2 ? LV_OPA_COVER : LV_OPA_30);
+    }
+#else
+    (void)elapsed_ms;
+#endif
+}
 bool DisplayDevice::resetPanel() {
-    /* RESET GPIO 时序：低电平约 10ms，再拉高并等待 120ms。 */
+    /* RESET GPIO sequence: low for about 10ms, then high and wait 120ms. */
     if (!setGpio(config_.st7789_gpio_reset, false)) {
         return false;
     }
