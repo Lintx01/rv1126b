@@ -212,7 +212,11 @@ cmake --build build-tools -j2 --target gesture_image_test single_image_ai_debug
 * `single_image_ai_debug`: `/tmp/debug_cup_input.jpg`
 * `single_image_ai_debug`: `/tmp/single_image_ai_debug_overlay.jpg`
 
-单图测试工具是否和实时主程序使用同一套预处理逻辑，需要以后确认；不要把单图结果直接等同于实时视频效果。
+single_image_ai_debug 当前复用实时主程序的 `ImageProcessor::cropResize()` 生成 gesture / pose / cup 三路模型输入。工具会先用 OpenCV 读取单张图片，再构造原始 RGB `Frame`，随后按整图 crop 生成 224x224 或 640x640 的模型输入；这些输入会带 `PreprocessTransform`，因此 Pose/Cup 结果沿用模型内部基于 `Frame.transform` 的坐标反算逻辑。
+
+`single_image_ai_debug` 支持 `RV_PREPROCESS_MODE=rga` 和 `RV_PREPROCESS_MODE=opencv`，用于尽量模拟实时视频主程序的 RGA/OpenCV 预处理后端；未设置时使用默认预处理配置。它仍会输出 `/tmp/debug_gesture_input.jpg`、`/tmp/debug_pose_input.jpg`、`/tmp/debug_cup_input.jpg` 和 `/tmp/single_image_ai_debug_overlay.jpg`，其中 debug 输入图来自 `ImageProcessor::cropResize()` 实际生成的模型输入。
+
+单图调试图仍然保留详细绘制：person box、pose keypoints、skeleton、所有 cup 候选框、score/class_id 以及 gesture/posture/drink 文本。实时视频 overlay 不因此改变，仍只画筛选后的少量框以降低 CPU 压力和画面混乱。喝水连续判断在单图工具中仍是调试用途，不完全等同于实时视频时间序列。
 single_image_ai_debug 的 CUP 部分会打印：
 
 * `cup_count`

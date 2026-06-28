@@ -277,6 +277,7 @@ add_executable(single_image_ai_debug
     src/GestureModel.cpp
     src/PerceptionModules.cpp
     src/RknnModel.cpp
+    src/VideoPipeline.cpp
 )
 
 target_include_directories(single_image_ai_debug PRIVATE
@@ -300,4 +301,10 @@ if(RV1126B_ENABLE_OPENCV)
         opencv_imgproc
         opencv_imgcodecs
     )
+endif()
+
+if(RV1126B_ENABLE_RGA AND RGA_INCLUDE_DIR AND RGA_LIBRARY)
+    target_include_directories(single_image_ai_debug PRIVATE ${RGA_INCLUDE_DIR})
+    target_link_libraries(single_image_ai_debug PRIVATE ${RGA_LIBRARY})
+    target_compile_definitions(single_image_ai_debug PRIVATE RV1126B_HAS_RGA=1)
 endif()

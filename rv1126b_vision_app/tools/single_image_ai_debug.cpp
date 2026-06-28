@@ -1,10 +1,12 @@
 #include "Interfaces.hpp"
+#include "VideoPipeline.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -164,60 +166,20 @@ std::string classIdText(int class_id) {
     return std::to_string(class_id);
 }
 
-rv1126b::Box mapBoxToOriginal(
-    const rv1126b::Box& box,
-    int model_width,
-    int model_height,
-    int original_width,
-    int original_height) {
-    rv1126b::Box mapped = box;
-    const float sx = static_cast<float>(original_width) / static_cast<float>(std::max(1, model_width));
-    const float sy = static_cast<float>(original_height) / static_cast<float>(std::max(1, model_height));
-    mapped.x = box.x * sx;
-    mapped.y = box.y * sy;
-    mapped.w = box.w * sx;
-    mapped.h = box.h * sy;
-    return mapped;
-}
-
-rv1126b::PoseKeypoint mapKeypointToOriginal(
-    const rv1126b::PoseKeypoint& keypoint,
-    int model_width,
-    int model_height,
-    int original_width,
-    int original_height) {
-    rv1126b::PoseKeypoint mapped = keypoint;
-    mapped.x = keypoint.x * static_cast<float>(original_width) / static_cast<float>(std::max(1, model_width));
-    mapped.y = keypoint.y * static_cast<float>(original_height) / static_cast<float>(std::max(1, model_height));
-    return mapped;
-}
-
-void mapPoseToOriginal(
-    rv1126b::PoseResult& pose,
-    int model_width,
-    int model_height,
-    int original_width,
-    int original_height) {
-    if (pose.has_person) {
-        pose.person_box = mapBoxToOriginal(pose.person_box, model_width, model_height, original_width, original_height);
+std::string applyPreprocessMode(rv1126b::AppConfig& config) {
+    const char* preprocess_mode = std::getenv("RV_PREPROCESS_MODE");
+    if (preprocess_mode != nullptr && std::strcmp(preprocess_mode, "rga") == 0) {
+        config.use_rga_preprocess = true;
+        config.fallback_to_opencv = false;
+        return "rga";
     }
-    for (auto& keypoint : pose.keypoints) {
-        keypoint = mapKeypointToOriginal(keypoint, model_width, model_height, original_width, original_height);
+    if (preprocess_mode != nullptr && std::strcmp(preprocess_mode, "opencv") == 0) {
+        config.use_rga_preprocess = false;
+        config.fallback_to_opencv = true;
+        return "opencv";
     }
+    return "default";
 }
-
-void mapCupToOriginal(
-    rv1126b::CupResult& cup,
-    int model_width,
-    int model_height,
-    int original_width,
-    int original_height) {
-    cup.cup_box = mapBoxToOriginal(cup.cup_box, model_width, model_height, original_width, original_height);
-    for (auto& box : cup.cups) {
-        box = mapBoxToOriginal(box, model_width, model_height, original_width, original_height);
-    }
-}
-
 float estimateDrinkDistanceNorm(const rv1126b::PoseResult& pose, const rv1126b::CupResult& cup, float threshold) {
     if (!pose.valid || !pose.has_person || !cup.valid || cup.cups.empty()) {
         return std::numeric_limits<float>::quiet_NaN();
@@ -257,28 +219,112 @@ float estimateDrinkDistanceNorm(const rv1126b::PoseResult& pose, const rv1126b::
 }
 
 #if defined(RV1126B_HAS_OPENCV)
-bool makeRgbFrameFromImage(
-    const cv::Mat& original_bgr,
+rv1126b::CropRect normalizeCropForFallback(const rv1126b::Frame& source, const rv1126b::CropRect& crop) {
+    rv1126b::CropRect normalized = crop;
+    if (normalized.width <= 0 || normalized.height <= 0) {
+        normalized = rv1126b::CropRect{0, 0, source.width, source.height};
+    }
+    normalized.x = std::clamp(normalized.x, 0, std::max(0, source.width - 1));
+    normalized.y = std::clamp(normalized.y, 0, std::max(0, source.height - 1));
+    normalized.width = std::clamp(normalized.width, 1, source.width - normalized.x);
+    normalized.height = std::clamp(normalized.height, 1, source.height - normalized.y);
+    return normalized;
+}
+
+void fillTransform(
+    const rv1126b::Frame& source,
+    const rv1126b::CropRect& crop,
+    int model_width,
+    int model_height,
+    rv1126b::Frame& frame) {
+    frame.transform.source_width = source.width;
+    frame.transform.source_height = source.height;
+    frame.transform.source_crop = crop;
+    frame.transform.model_width = model_width;
+    frame.transform.model_height = model_height;
+    frame.transform.valid = true;
+}
+
+bool makeSourceFrameFromRgb(const cv::Mat& original_rgb, uint64_t frame_id, rv1126b::Frame& frame) {
+    if (original_rgb.empty() || original_rgb.channels() != 3) {
+        return false;
+    }
+    const cv::Mat rgb = original_rgb.isContinuous() ? original_rgb : original_rgb.clone();
+    frame.id = frame_id;
+    frame.width = rgb.cols;
+    frame.height = rgb.rows;
+    frame.channels = 3;
+    frame.format = rv1126b::PixelFormat::RGB888;
+    frame.timestamp_ms = 0;
+    frame.transform = rv1126b::PreprocessTransform{};
+    frame.data.assign(rgb.data, rgb.data + rgb.total() * rgb.elemSize());
+    return true;
+}
+
+bool saveRgbFrameDebug(const rv1126b::Frame& frame, const std::string& debug_path) {
+    if (frame.data.empty() || frame.width <= 0 || frame.height <= 0 ||
+        frame.format != rv1126b::PixelFormat::RGB888 || frame.channels < 3) {
+        return false;
+    }
+    cv::Mat rgb(frame.height, frame.width, CV_8UC3, const_cast<uint8_t*>(frame.data.data()));
+    cv::Mat bgr;
+    cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
+    return cv::imwrite(debug_path, bgr);
+}
+
+bool fallbackResizeWithOpenCv(
+    const rv1126b::Frame& source,
+    const rv1126b::CropRect& crop,
     int width,
     int height,
     const std::string& debug_path,
-    uint64_t frame_id,
     rv1126b::Frame& frame) {
-    cv::Mat resized_bgr;
-    cv::resize(original_bgr, resized_bgr, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
-    cv::imwrite(debug_path, resized_bgr);
+    if (source.data.empty() || source.width <= 0 || source.height <= 0 ||
+        source.format != rv1126b::PixelFormat::RGB888 || source.channels < 3) {
+        return false;
+    }
 
-    cv::Mat rgb;
-    cv::cvtColor(resized_bgr, rgb, cv::COLOR_BGR2RGB);
+    const rv1126b::CropRect normalized = normalizeCropForFallback(source, crop);
+    cv::Mat source_rgb(source.height, source.width, CV_8UC3, const_cast<uint8_t*>(source.data.data()));
+    cv::Rect roi(normalized.x, normalized.y, normalized.width, normalized.height);
+    cv::Mat resized_rgb;
+    cv::resize(source_rgb(roi), resized_rgb, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
 
-    frame.id = frame_id;
+    frame.id = source.id;
     frame.width = width;
     frame.height = height;
     frame.channels = 3;
     frame.format = rv1126b::PixelFormat::RGB888;
-    frame.timestamp_ms = 0;
-    frame.data.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3U);
-    std::memcpy(frame.data.data(), rgb.data, frame.data.size());
+    frame.timestamp_ms = source.timestamp_ms;
+    frame.data.assign(resized_rgb.data, resized_rgb.data + resized_rgb.total() * resized_rgb.elemSize());
+    fillTransform(source, normalized, width, height, frame);
+    (void)saveRgbFrameDebug(frame, debug_path);
+    return true;
+}
+
+bool preprocessModelInput(
+    rv1126b::ImageProcessor& image_processor,
+    const rv1126b::Frame& source,
+    const rv1126b::CropRect& crop,
+    int width,
+    int height,
+    const char* model_name,
+    const std::string& debug_path,
+    rv1126b::Frame& frame) {
+    if (image_processor.cropResize(source, crop, width, height, frame)) {
+        (void)saveRgbFrameDebug(frame, debug_path);
+        std::cout << "[SingleImage] " << model_name << "_input="
+                  << width << "x" << height << " via ImageProcessor\n";
+        return true;
+    }
+
+    std::cerr << "[SingleImage][WARN] " << model_name << " preprocess fallback\n";
+    if (!fallbackResizeWithOpenCv(source, crop, width, height, debug_path, frame)) {
+        std::cerr << "[SingleImage][ERROR] " << model_name << " preprocess failed\n";
+        return false;
+    }
+    std::cout << "[SingleImage] " << model_name << "_input="
+              << width << "x" << height << " via OpenCV fallback\n";
     return true;
 }
 
@@ -452,32 +498,61 @@ int main(int argc, char** argv) {
     }
 
     rv1126b::AppConfig config = makeDebugConfig();
+    const std::string preprocess_mode = applyPreprocessMode(config);
 
+    cv::Mat original_rgb;
+    cv::cvtColor(original_bgr, original_rgb, cv::COLOR_BGR2RGB);
+
+    rv1126b::Frame source_frame;
+    if (!makeSourceFrameFromRgb(original_rgb, 1, source_frame)) {
+        std::cerr << "failed to create source frame from image: " << image_path << "\n";
+        return 1;
+    }
+
+    std::cout << "[SingleImage] image=" << image_path << "\n";
+    std::cout << "[SingleImage] original=" << source_frame.width << "x" << source_frame.height << "\n";
+    std::cout << "[SingleImage] preprocess_mode=" << preprocess_mode << "\n";
+
+    rv1126b::ImageProcessor image_processor;
+    if (!image_processor.open(config)) {
+        std::cerr << "[SingleImage][ERROR] ImageProcessor open failed\n";
+        return 1;
+    }
+
+    const rv1126b::CropRect full_frame_crop{0, 0, source_frame.width, source_frame.height};
     rv1126b::Frame gesture_input;
     rv1126b::Frame pose_input;
     rv1126b::Frame cup_input;
-    makeRgbFrameFromImage(
-        original_bgr,
-        config.gesture_input_width,
-        config.gesture_input_height,
-        "/tmp/debug_gesture_input.jpg",
-        1,
-        gesture_input);
-    makeRgbFrameFromImage(
-        original_bgr,
-        config.pose_input_width,
-        config.pose_input_height,
-        "/tmp/debug_pose_input.jpg",
-        2,
-        pose_input);
-    makeRgbFrameFromImage(
-        original_bgr,
-        config.cup_input_width,
-        config.cup_input_height,
-        "/tmp/debug_cup_input.jpg",
-        3,
-        cup_input);
-
+    if (!preprocessModelInput(
+            image_processor,
+            source_frame,
+            full_frame_crop,
+            config.gesture_input_width,
+            config.gesture_input_height,
+            "gesture",
+            "/tmp/debug_gesture_input.jpg",
+            gesture_input) ||
+        !preprocessModelInput(
+            image_processor,
+            source_frame,
+            full_frame_crop,
+            config.pose_input_width,
+            config.pose_input_height,
+            "pose",
+            "/tmp/debug_pose_input.jpg",
+            pose_input) ||
+        !preprocessModelInput(
+            image_processor,
+            source_frame,
+            full_frame_crop,
+            config.cup_input_width,
+            config.cup_input_height,
+            "cup",
+            "/tmp/debug_cup_input.jpg",
+            cup_input)) {
+        image_processor.close();
+        return 1;
+    }
     rv1126b::GestureModel gesture_model;
     rv1126b::PoseModel pose_model;
     rv1126b::CupModel cup_model;
@@ -494,8 +569,6 @@ int main(int argc, char** argv) {
     rv1126b::PoseResult pose = pose_model.infer(pose_input);
     rv1126b::CupResult cup = cup_model.infer(cup_input);
 
-    mapPoseToOriginal(pose, config.pose_input_width, config.pose_input_height, original_bgr.cols, original_bgr.rows);
-    mapCupToOriginal(cup, config.cup_input_width, config.cup_input_height, original_bgr.cols, original_bgr.rows);
 
     const rv1126b::PostureState posture = posture_analyzer.update(pose);
     rv1126b::DrinkState drink = rv1126b::DrinkState::Normal;
@@ -508,6 +581,7 @@ int main(int argc, char** argv) {
     std::cout << "========== IMAGE ==========\n";
     std::cout << "path=" << image_path << "\n";
     std::cout << "original=" << original_bgr.cols << "x" << original_bgr.rows << "\n";
+    std::cout << "preprocess_mode=" << preprocess_mode << "\n";
 
     std::cout << "\n========== GESTURE ==========\n";
     std::cout << "valid=" << gesture.valid << "\n";
@@ -532,6 +606,7 @@ int main(int argc, char** argv) {
     std::cout << "\n";
 
     drawOverlay(original_bgr, gesture, pose, cup, posture, drink);
+    image_processor.close();
     std::cout << "\noutputs=/tmp/debug_gesture_input.jpg,/tmp/debug_pose_input.jpg,/tmp/debug_cup_input.jpg,"
               << "/tmp/single_image_ai_debug_overlay.jpg\n";
     return 0;
