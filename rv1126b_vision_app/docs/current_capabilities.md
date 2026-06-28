@@ -47,7 +47,7 @@ C:\Users\AgiUser\Desktop\代码\6.27\rv1126b\rv1126b_vision_app
 饮品检测当前支持两种 config profile：
 
 1. `CupModelProfile::Coco`：使用 `model/yolov8n_rv1126b_i8.rknn`，按 COCO class-aware YOLO 输出解析，只保留 `class_id=39/40/41`，分别对应 `bottle`、`wine_glass`、`cup`。
-2. `CupModelProfile::BottleBoxesOnly`：使用 `model/bottle_rv1126b_i8.rknn`，按 boxes-only 输出解析；模型不输出类别，不做 class_id 过滤，所有有效框默认作为 bottle，`label=bottle(box_only)`，`class_id=-1`。
+2. `CupModelProfile::BottleBoxesOnly`：使用 `model/bottle_rv1126b_i8.rknn`，当前输出格式为 `[1,5,8400]`，`anchors=8400`，按 `channel_first_1x5x8400` 解析：channel 0 = `cx`，channel 1 = `cy`，channel 2 = `w`，channel 3 = `h`，channel 4 = `score`，日志中 `score_source=channel4`。该模型不输出类别，不做 class_id 过滤，所有 `score >= cup_score_threshold` 的有效框默认作为 bottle，`label=bottle(box_only)`，`class_id=-1`。NMS 后最多保留 `cup_max_output_boxes` 个框。不要把该模型当 Nx5 flat 输出解析，也不要当 `class_id` 为 `0` 的单类别模型解析。
 
 切换方式是在配置中修改：`config.cup_model_profile = CupModelProfile::Coco;` 或 `config.cup_model_profile = CupModelProfile::BottleBoxesOnly;`，然后调用 `applyCupModelProfile(config)`。当前比赛建议使用 `BottleBoxesOnly`。
 

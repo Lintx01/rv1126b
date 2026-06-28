@@ -448,17 +448,26 @@ std::string boxSummary(const Box& box) {
     return oss.str();
 }
 
-std::string cupBoxesSummary(const CupResult& result) {
+std::string cupBoxesSummary(const CupResult& result, const AppConfig& config) {
     if (result.cups.empty()) {
-        return "none";
+        return "count=0,best=none";
     }
 
     std::ostringstream oss;
-    for (std::size_t i = 0; i < result.cups.size(); ++i) {
-        if (i > 0) {
-            oss << "|";
+    oss << "count=" << result.cups.size()
+        << ",best=" << boxSummary(result.cup_box);
+    if (config.cup_log_verbose_boxes) {
+        const std::size_t max_boxes = std::min(config.cup_log_max_boxes, result.cups.size());
+        oss << ",boxes=";
+        for (std::size_t i = 0; i < max_boxes; ++i) {
+            if (i > 0) {
+                oss << "|";
+            }
+            oss << boxSummary(result.cups[i]);
         }
-        oss << boxSummary(result.cups[i]);
+        if (result.cups.size() > max_boxes) {
+            oss << "|...";
+        }
     }
     return oss.str();
 }
@@ -1187,7 +1196,7 @@ void VisionApp::aiLoop() {
                     std::cout << "[核心][cup] valid=" << (last_cup_result.valid ? "true" : "false")
                               << ", cups=" << last_cup_result.cups.size()
                               << ", frame=" << last_cup_result.frame_id
-                              << ", nms_boxes=" << cupBoxesSummary(last_cup_result)
+                              << ", boxes_summary=" << cupBoxesSummary(last_cup_result, config_)
                               << "\n";
                 }
             }

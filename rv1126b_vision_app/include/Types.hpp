@@ -199,6 +199,9 @@ struct AppConfig {
     int drink_consecutive_hits{3};
     int cup_output_debug_dump_frames{1};
     int cup_output_debug_dump_values{80};
+    std::size_t cup_max_output_boxes{5};
+    std::size_t cup_log_max_boxes{3};
+    bool cup_log_verbose_boxes{false};
     bool drink_timer_reminder_enabled{true};
     int drink_timer_interval_ms{30 * 60 * 1000};
     int drink_timer_repeat_ms{5 * 60 * 1000};

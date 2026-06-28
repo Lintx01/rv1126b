@@ -279,6 +279,18 @@ std::vector<DetectionCandidate> nmsDetections(std::vector<DetectionCandidate> ca
     return kept;
 }
 
+void sortAndLimitDetections(std::vector<DetectionCandidate>& detections, const AppConfig& config) {
+    std::sort(
+        detections.begin(),
+        detections.end(),
+        [](const DetectionCandidate& lhs, const DetectionCandidate& rhs) {
+            return lhs.score > rhs.score;
+        });
+    if (config.cup_max_output_boxes > 0 && detections.size() > config.cup_max_output_boxes) {
+        detections.resize(config.cup_max_output_boxes);
+    }
+}
+
 bool tensorGridInfo(
     const RknnTensorInfo& info,
     std::size_t value_count,
@@ -742,6 +754,7 @@ struct BottleBoxesOnlyDecodeInfo {
     bool decoded{false};
     std::string format;
     std::string score_source;
+    std::size_t anchors{0};
 };
 
 Box makeBottleBoxOnlyBox(float a, float b, float c, float d, float score, const Frame& frame) {
@@ -753,18 +766,12 @@ Box makeBottleBoxOnlyBox(float a, float b, float c, float d, float score, const 
 
     if (normalized) {
         a *= static_cast<float>(frame_width);
-        c *= static_cast<float>(frame_width);
         b *= static_cast<float>(frame_height);
+        c *= static_cast<float>(frame_width);
         d *= static_cast<float>(frame_height);
     }
 
-    const bool likely_xyxy = c > a && d > b &&
-        c <= static_cast<float>(frame_width) * 1.2F &&
-        d <= static_cast<float>(frame_height) * 1.2F;
-
-    Box box = likely_xyxy ?
-        makeBoxFromValues(a, b, c, d, frame_width, frame_height) :
-        makeBoxFromCenter(a, b, c, d, frame_width, frame_height);
+    Box box = makeBoxFromCenter(a, b, c, d, frame_width, frame_height);
     box.score = score;
     return box;
 }
@@ -775,7 +782,7 @@ void appendBottleBoxesOnlyDetection(
     const AppConfig& config,
     std::vector<DetectionCandidate>& candidates) {
     if (!std::isfinite(box.x) || !std::isfinite(box.y) || !std::isfinite(box.w) ||
-        !std::isfinite(box.h) || !std::isfinite(score) || box.w < 1.0F || box.h < 1.0F) {
+        !std::isfinite(box.h) || !std::isfinite(score) || box.w < 2.0F || box.h < 2.0F) {
         return;
     }
 
@@ -786,6 +793,42 @@ void appendBottleBoxesOnlyDetection(
     candidate.class_id = config.cup_box_only_class_id;
     candidate.score = score;
     candidates.push_back(candidate);
+}
+
+bool isBottleChannelFirst1x5x8400(const RknnTensorInfo& info, const std::vector<float>& values, std::size_t& anchors) {
+    if (info.n_dims != 3 || info.dims.size() != 3 || values.empty()) {
+        return false;
+    }
+    const bool shape_1x5x8400 = info.dims[0] == 1U && info.dims[1] == 5U && info.dims[2] == 8400U;
+    if (!shape_1x5x8400) {
+        return false;
+    }
+    anchors = static_cast<std::size_t>(info.dims[2]);
+    return values.size() >= 5U * anchors;
+}
+
+void decodeBottleBoxesOnlyChannelFirst(
+    const std::vector<float>& values,
+    std::size_t anchors,
+    const Frame& frame,
+    const AppConfig& config,
+    std::vector<DetectionCandidate>& candidates) {
+    for (std::size_t index = 0; index < anchors; ++index) {
+        const float cx = values[0 * anchors + index];
+        const float cy = values[1 * anchors + index];
+        const float w = values[2 * anchors + index];
+        const float h = values[3 * anchors + index];
+        const float score = normalizeYoloScore(values[4 * anchors + index]);
+        if (!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(w) || !std::isfinite(h) ||
+            !std::isfinite(score) || w <= 0.0F || h <= 0.0F || score < config.cup_score_threshold) {
+            continue;
+        }
+        appendBottleBoxesOnlyDetection(
+            makeBottleBoxOnlyBox(cx, cy, w, h, score, frame),
+            score,
+            config,
+            candidates);
+    }
 }
 
 void decodeBottleBoxesOnlyFlat(
@@ -940,13 +983,28 @@ void dumpBottleBoxesOnlyOutputs(const std::vector<std::vector<float>>& outputs, 
     std::cout.flags(old_flags);
     std::cout.precision(old_precision);
 }
+
 BottleBoxesOnlyDecodeInfo decodeBottleBoxesOnlyOutputs(
     const std::vector<std::vector<float>>& outputs,
+    const std::vector<RknnTensorInfo>& output_infos,
     const Frame& frame,
     const AppConfig& config,
     std::vector<DetectionCandidate>& candidates) {
     BottleBoxesOnlyDecodeInfo info;
 
+    if (!outputs.empty() && !output_infos.empty()) {
+        std::size_t anchors = 0;
+        if (isBottleChannelFirst1x5x8400(output_infos[0], outputs[0], anchors)) {
+            info.decoded = true;
+            info.format = "channel_first_1x5x8400";
+            info.score_source = "channel4";
+            info.anchors = anchors;
+            decodeBottleBoxesOnlyChannelFirst(outputs[0], anchors, frame, config, candidates);
+            return info;
+        }
+    }
+
+    std::cout << "[CupModel][BottleBoxesOnly][WARN] output attr unavailable, fallback to flat parser\n";
     if (outputs.size() >= 2 && outputs[0].size() >= 4 && outputs[0].size() % 4 == 0 &&
         outputs[1].size() == outputs[0].size() / 4) {
         info.decoded = true;
@@ -1395,50 +1453,59 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
     std::string parser_name;
     std::string score_source;
     std::string format;
+    std::size_t anchors = 0;
 
     if (config_.cup_output_mode == CupOutputMode::BottleBoxesOnly) {
         dumpBottleBoxesOnlyOutputs(outputs, config_);
-        BottleBoxesOnlyDecodeInfo info = decodeBottleBoxesOnlyOutputs(outputs, frame, config_, candidates);
+        BottleBoxesOnlyDecodeInfo info = decodeBottleBoxesOnlyOutputs(outputs, model_.outputInfos(), frame, config_, candidates);
         if (info.decoded) {
             parser_name = "bottle_boxes_only_decoder";
             score_source = info.score_source;
             format = info.format;
+            anchors = info.anchors;
         }
 
         if (!parser_name.empty()) {
             const std::size_t candidate_count = candidates.size();
-            const auto kept = nmsDetections(std::move(candidates), kCupNmsThreshold);
+            auto kept = nmsDetections(std::move(candidates), kCupNmsThreshold);
+            const std::size_t kept_after_nms = kept.size();
+            sortAndLimitDetections(kept, config_);
+            const std::size_t kept_used = kept.size();
             for (const auto& kept_box : kept) {
                 result.cups.push_back(kept_box.box);
             }
 
             if (!result.cups.empty()) {
                 result.valid = true;
-                result.cup_box = *std::max_element(
-                    result.cups.begin(),
-                    result.cups.end(),
-                    [](const Box& lhs, const Box& rhs) {
-                        return lhs.score < rhs.score;
-                    });
+                result.cup_box = result.cups.front();
                 inverseTransformCupResult(result, frame);
             }
 
             std::cout << "[CupModel][BottleBoxesOnly] outputs=" << outputs.size()
-                      << ", format=" << format
-                      << ", candidates=" << candidate_count
-                      << ", kept_after_nms=" << result.cups.size()
+                      << ", format=" << format;
+            if (anchors > 0) {
+                std::cout << ", anchors=" << anchors;
+            }
+            std::cout << ", candidates=" << candidate_count
+                      << ", kept_after_nms=" << kept_after_nms
+                      << ", kept_used=" << kept_used
                       << ", score_source=" << score_source << "\n";
 
             std::ostringstream oss;
             oss << parser_name
                 << ",format=" << format
                 << ",class_ids=none"
+                << ",candidates_before_nms=" << candidate_count
                 << ",candidates=" << candidate_count
-                << ",kept_after_nms=" << result.cups.size()
+                << ",kept_after_nms=" << kept_after_nms
+                << ",kept_used=" << kept_used
                 << ",best_score=" << (result.cups.empty() ? 0.0F : result.cup_box.score)
                 << ",best_class_id=-1"
-                << ",score_source=" << score_source
-                << ",coords=" << (frame.transform.valid ? "source_after_resize_inverse" : "model_input");
+                << ",score_source=" << score_source;
+            if (anchors > 0) {
+                oss << ",anchors=" << anchors;
+            }
+            oss << ",coords=" << (frame.transform.valid ? "source_after_resize_inverse" : "model_input");
             result.message = oss.str();
             return result;
         }
@@ -1468,26 +1535,26 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
 
     if (!parser_name.empty()) {
         const std::size_t candidate_count = candidates.size();
-        const auto kept = nmsDetections(std::move(candidates), kCupNmsThreshold);
+        auto kept = nmsDetections(std::move(candidates), kCupNmsThreshold);
+        const std::size_t kept_after_nms = kept.size();
+        sortAndLimitDetections(kept, config_);
+        const std::size_t kept_used = kept.size();
         for (const auto& kept_box : kept) {
             result.cups.push_back(kept_box.box);
         }
 
         if (!result.cups.empty()) {
             result.valid = true;
-            result.cup_box = *std::max_element(
-                result.cups.begin(),
-                result.cups.end(),
-                [](const Box& lhs, const Box& rhs) {
-                    return lhs.score < rhs.score;
-                });
+            result.cup_box = result.cups.front();
             inverseTransformCupResult(result, frame);
 
             std::ostringstream oss;
             oss << parser_name
                 << ",class_ids=" << cupClassIdsForConfigLog(config_)
+                << ",candidates_before_nms=" << candidate_count
                 << ",candidates=" << candidate_count
-                << ",kept_after_nms=" << result.cups.size()
+                << ",kept_after_nms=" << kept_after_nms
+                << ",kept_used=" << kept_used
                 << ",best_score=" << result.cup_box.score
                 << ",coords=" << (frame.transform.valid ? "source_after_resize_inverse" : "model_input");
             result.message = oss.str();
@@ -1497,15 +1564,17 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
         std::ostringstream oss;
         oss << parser_name
             << ",class_ids=" << cupClassIdsForConfigLog(config_)
-            << ",candidates=0,kept_after_nms=0";
+            << ",candidates_before_nms=" << candidate_count
+            << ",candidates=" << candidate_count
+            << ",kept_after_nms=" << kept_after_nms
+            << ",kept_used=0";
         result.message = oss.str();
         return result;
     }
 
     result.message = "cup_output_no_box_over_threshold";
     return result;
-}
-CupResult CupModel::fallbackInfer(const Frame& frame) const {
+}CupResult CupModel::fallbackInfer(const Frame& frame) const {
     CupResult result;
     result.frame_id = frame.id;
     result.timestamp_ms = frame.timestamp_ms;

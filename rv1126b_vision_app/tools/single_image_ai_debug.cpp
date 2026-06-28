@@ -450,6 +450,10 @@ void printCup(const rv1126b::CupResult& cup, const rv1126b::AppConfig& config) {
         cup.message,
         "kept_after_nms",
         std::to_string(cup.cups.size()));
+    const std::string kept_used = messageFieldOr(
+        cup.message,
+        "kept_used",
+        std::to_string(cup.cups.size()));
     const int best_class_id = cup.cups.empty() ? -1 : classIdFromLabel(cup.cup_box.label);
     const float best_score = cup.cups.empty() ? 0.0F : cup.cup_box.score;
 
@@ -470,14 +474,17 @@ void printCup(const rv1126b::CupResult& cup, const rv1126b::AppConfig& config) {
     }
 
     std::cout << "cups:\n";
-    for (std::size_t i = 0; i < cup.cups.size(); ++i) {
+    const std::size_t max_print = std::min<std::size_t>(20, cup.cups.size());
+    for (std::size_t i = 0; i < max_print; ++i) {
         const rv1126b::Box& box = cup.cups[i];
         std::cout << i
                   << " class_id=" << classIdText(classIdFromLabel(box.label))
                   << " score=" << scoreText(box.score)
                   << " box=" << boxRectText(box) << "\n";
     }
-}
+    if (cup.cups.size() > max_print) {
+        std::cout << "... truncated, total=" << cup.cups.size() << "\n";
+    }}
 
 }  // namespace
 
