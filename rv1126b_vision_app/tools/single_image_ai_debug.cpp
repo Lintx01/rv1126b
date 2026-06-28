@@ -56,7 +56,8 @@ rv1126b::AppConfig makeDebugConfig() {
 
     config.gesture_model_path = "model/yolov5_gesture_rv1126b.rknn";
     config.pose_model_path = "model/yolov8n-pose-rv1126b-i8.rknn";
-    config.cup_model_path = "model/yolov8n_rv1126b_i8.rknn";
+    config.cup_model_profile = rv1126b::CupModelProfile::BottleBoxesOnly;
+    rv1126b::applyCupModelProfile(config);
 
     config.gesture_input_width = 224;
     config.gesture_input_height = 224;
@@ -440,7 +441,7 @@ void printPose(const rv1126b::PoseResult& pose, rv1126b::PostureState posture) {
 }
 
 void printCup(const rv1126b::CupResult& cup, const rv1126b::AppConfig& config) {
-    const std::string class_ids = messageFieldOr(cup.message, "class_ids", "39|40|41");
+    const std::string class_ids = messageFieldOr(cup.message, "class_ids", rv1126b::cupClassIdsForConfigLog(config));
     const std::string candidates_before_nms = messageFieldOr(
         cup.message,
         "candidates_before_nms",
@@ -499,6 +500,10 @@ int main(int argc, char** argv) {
 
     rv1126b::AppConfig config = makeDebugConfig();
     const std::string preprocess_mode = applyPreprocessMode(config);
+    std::cout << "[SingleImage][CupConfig] profile=" << rv1126b::cupModelProfileName(config.cup_model_profile)
+              << ", model=" << config.cup_model_path
+              << ", output_mode=" << rv1126b::cupOutputModeName(config.cup_output_mode)
+              << ", class_ids=" << rv1126b::cupClassIdsForConfigLog(config) << "\n";
 
     cv::Mat original_rgb;
     cv::cvtColor(original_bgr, original_rgb, cv::COLOR_BGR2RGB);

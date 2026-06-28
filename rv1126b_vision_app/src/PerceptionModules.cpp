@@ -737,6 +737,142 @@ bool decodePostprocessedCupOutput(
     return decoded_any_output;
 }
 
+struct BottleBoxesOnlyDecodeInfo {
+    bool decoded{false};
+    std::string format;
+    std::string score_source;
+};
+
+Box makeBottleBoxOnlyBox(float a, float b, float c, float d, float score, const Frame& frame) {
+    const int frame_width = std::max(1, frame.width);
+    const int frame_height = std::max(1, frame.height);
+    const bool normalized =
+        a >= 0.0F && a <= 1.5F && b >= 0.0F && b <= 1.5F &&
+        c >= 0.0F && c <= 1.5F && d >= 0.0F && d <= 1.5F;
+
+    if (normalized) {
+        a *= static_cast<float>(frame_width);
+        c *= static_cast<float>(frame_width);
+        b *= static_cast<float>(frame_height);
+        d *= static_cast<float>(frame_height);
+    }
+
+    const bool likely_xyxy = c > a && d > b &&
+        c <= static_cast<float>(frame_width) * 1.2F &&
+        d <= static_cast<float>(frame_height) * 1.2F;
+
+    Box box = likely_xyxy ?
+        makeBoxFromValues(a, b, c, d, frame_width, frame_height) :
+        makeBoxFromCenter(a, b, c, d, frame_width, frame_height);
+    box.score = score;
+    return box;
+}
+
+void appendBottleBoxesOnlyDetection(
+    const Box& box,
+    float score,
+    const AppConfig& config,
+    std::vector<DetectionCandidate>& candidates) {
+    if (!std::isfinite(box.x) || !std::isfinite(box.y) || !std::isfinite(box.w) ||
+        !std::isfinite(box.h) || !std::isfinite(score) || box.w < 1.0F || box.h < 1.0F) {
+        return;
+    }
+
+    DetectionCandidate candidate;
+    candidate.box = box;
+    candidate.box.score = score;
+    candidate.box.label = config.cup_box_only_label;
+    candidate.class_id = config.cup_box_only_class_id;
+    candidate.score = score;
+    candidates.push_back(candidate);
+}
+
+void decodeBottleBoxesOnlyFlat(
+    const std::vector<float>& values,
+    std::size_t stride,
+    const Frame& frame,
+    const AppConfig& config,
+    std::vector<DetectionCandidate>& candidates) {
+    if (stride != 4 && stride != 5) {
+        return;
+    }
+    const std::size_t candidate_count = values.size() / stride;
+    for (std::size_t index = 0; index < candidate_count; ++index) {
+        const std::size_t offset = index * stride;
+        const float score = stride == 5 ? normalizeYoloScore(values[offset + 4]) : 1.0F;
+        if (score < config.cup_score_threshold) {
+            continue;
+        }
+        appendBottleBoxesOnlyDetection(
+            makeBottleBoxOnlyBox(
+                values[offset + 0],
+                values[offset + 1],
+                values[offset + 2],
+                values[offset + 3],
+                score,
+                frame),
+            score,
+            config,
+            candidates);
+    }
+}
+
+BottleBoxesOnlyDecodeInfo decodeBottleBoxesOnlyOutputs(
+    const std::vector<std::vector<float>>& outputs,
+    const Frame& frame,
+    const AppConfig& config,
+    std::vector<DetectionCandidate>& candidates) {
+    BottleBoxesOnlyDecodeInfo info;
+
+    if (outputs.size() >= 2 && outputs[0].size() >= 4 && outputs[0].size() % 4 == 0 &&
+        outputs[1].size() == outputs[0].size() / 4) {
+        info.decoded = true;
+        info.format = "boxes_scores";
+        info.score_source = "model_score";
+        const std::size_t candidate_count = outputs[1].size();
+        for (std::size_t index = 0; index < candidate_count; ++index) {
+            const std::size_t offset = index * 4;
+            const float score = normalizeYoloScore(outputs[1][index]);
+            if (score < config.cup_score_threshold) {
+                continue;
+            }
+            appendBottleBoxesOnlyDetection(
+                makeBottleBoxOnlyBox(
+                    outputs[0][offset + 0],
+                    outputs[0][offset + 1],
+                    outputs[0][offset + 2],
+                    outputs[0][offset + 3],
+                    score,
+                    frame),
+                score,
+                config,
+                candidates);
+        }
+        return info;
+    }
+
+    for (const auto& values : outputs) {
+        if (values.empty()) {
+            continue;
+        }
+        if (values.size() >= 5 && values.size() % 5 == 0) {
+            info.decoded = true;
+            info.format = "Nx5";
+            info.score_source = "model_score";
+            decodeBottleBoxesOnlyFlat(values, 5, frame, config, candidates);
+            return info;
+        }
+        if (values.size() >= 4 && values.size() % 4 == 0) {
+            info.decoded = true;
+            info.format = "Nx4";
+            info.score_source = "default_no_score";
+            decodeBottleBoxesOnlyFlat(values, 4, frame, config, candidates);
+            return info;
+        }
+    }
+
+    return info;
+}
 bool decodeYoloPoseRawOutputs(
     const std::vector<std::vector<float>>& outputs,
     const std::vector<RknnTensorInfo>& output_infos,
@@ -1091,17 +1227,18 @@ PoseResult PoseModel::fallbackInfer(const Frame& frame) const {
 
 bool CupModel::load(const AppConfig& config) {
     config_ = config;
+    applyCupModelProfile(config_);
     loaded_ = true;
-    fallback_mode_ = !model_.load(config.cup_model_path);
+    fallback_mode_ = !model_.load(config_.cup_model_path);
     std::cout << "[CupModel] load: "
-              << (config.cup_model_path.empty() ? "<pending>" : config.cup_model_path)
+              << (config_.cup_model_path.empty() ? "<pending>" : config_.cup_model_path)
               << ", mode=" << (fallback_mode_ ? "stub" : "rknn") << "\n";
-    std::cout << "[阈值][饮品模型] class_ids=" << drinkClassIdsForLog()
-              << ", score >= " << config.cup_score_threshold
+    std::cout << "[阈值][饮品模型] output_mode=" << cupOutputModeName(config_.cup_output_mode)
+              << ", class_ids=" << cupClassIdsForConfigLog(config_)
+              << ", score >= " << config_.cup_score_threshold
               << " 才进入候选，NMS IoU=" << kCupNmsThreshold << "\n";
     return true;
 }
-
 CupResult CupModel::infer(const Frame& frame) {
     CupResult result;
     result.frame_id = frame.id;
@@ -1133,8 +1270,59 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
 
     std::vector<DetectionCandidate> candidates;
     std::string parser_name;
+    std::string score_source;
+    std::string format;
 
-    // 水杯模型按 COCO 类别表接入，只保留 39/40/41 饮品容器类，避免其他 YOLO 检测框参与喝水距离判断。
+    if (config_.cup_output_mode == CupOutputMode::BottleBoxesOnly) {
+        BottleBoxesOnlyDecodeInfo info = decodeBottleBoxesOnlyOutputs(outputs, frame, config_, candidates);
+        if (info.decoded) {
+            parser_name = "bottle_boxes_only_decoder";
+            score_source = info.score_source;
+            format = info.format;
+        }
+
+        if (!parser_name.empty()) {
+            const std::size_t candidate_count = candidates.size();
+            const auto kept = nmsDetections(std::move(candidates), kCupNmsThreshold);
+            for (const auto& kept_box : kept) {
+                result.cups.push_back(kept_box.box);
+            }
+
+            if (!result.cups.empty()) {
+                result.valid = true;
+                result.cup_box = *std::max_element(
+                    result.cups.begin(),
+                    result.cups.end(),
+                    [](const Box& lhs, const Box& rhs) {
+                        return lhs.score < rhs.score;
+                    });
+                inverseTransformCupResult(result, frame);
+            }
+
+            std::cout << "[CupModel][BottleBoxesOnly] outputs=" << outputs.size()
+                      << ", format=" << format
+                      << ", candidates=" << candidate_count
+                      << ", kept_after_nms=" << result.cups.size()
+                      << ", score_source=" << score_source << "\n";
+
+            std::ostringstream oss;
+            oss << parser_name
+                << ",format=" << format
+                << ",class_ids=none"
+                << ",candidates=" << candidate_count
+                << ",kept_after_nms=" << result.cups.size()
+                << ",best_score=" << (result.cups.empty() ? 0.0F : result.cup_box.score)
+                << ",best_class_id=-1"
+                << ",score_source=" << score_source
+                << ",coords=" << (frame.transform.valid ? "source_after_resize_inverse" : "model_input");
+            result.message = oss.str();
+            return result;
+        }
+
+        result.message = "bottle_boxes_only_decoder_no_supported_output,class_ids=none";
+        return result;
+    }
+
     if (decodeYoloDetectionRawOutputs(outputs, model_.outputInfos(), frame, config_.cup_score_threshold, candidates)) {
         parser_name = "cup_yolov8_raw_decoder";
     }
@@ -1144,13 +1332,11 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
         parser_name = "cup_yolov8_split_decoder";
     }
 
-    // 兼容导出端已经把 DFL 解码成 [cx, cy, w, h, 80类分数] 的输出。
     if (parser_name.empty() &&
         decodeYoloDetectionDecodedOutput(outputs, model_.outputInfos(), frame, config_.cup_score_threshold, candidates)) {
         parser_name = "cup_yolov8_decoded_tensor";
     }
 
-    // 兼容模型侧或运行时已经后处理好的 [x,y,w/h,score,class] / [x,y,w/h,score] 输出。
     if (parser_name.empty() &&
         decodePostprocessedCupOutput(outputs, frame, config_.cup_score_threshold, candidates)) {
         parser_name = "cup_postprocessed_boxes";
@@ -1175,7 +1361,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
 
             std::ostringstream oss;
             oss << parser_name
-                << ",class_ids=" << drinkClassIdsForLog()
+                << ",class_ids=" << cupClassIdsForConfigLog(config_)
                 << ",candidates=" << candidate_count
                 << ",kept_after_nms=" << result.cups.size()
                 << ",best_score=" << result.cup_box.score
@@ -1186,65 +1372,15 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
 
         std::ostringstream oss;
         oss << parser_name
-            << ",class_ids=" << drinkClassIdsForLog()
+            << ",class_ids=" << cupClassIdsForConfigLog(config_)
             << ",candidates=0,kept_after_nms=0";
         result.message = oss.str();
         return result;
     }
 
-    std::size_t parsed_boxes = 0;
-    for (const auto& values : outputs) {
-        // 保守接入扁平水杯检测输出，每个候选框 5 个 float：
-        // x、y、w/x2、h/y2、score。低于阈值的框直接丢弃。
-        if (values.size() < 5) {
-            continue;
-        }
-
-        const std::size_t candidate_count = values.size() / 5;
-        for (std::size_t index = 0; index < candidate_count; ++index) {
-            const std::size_t offset = index * 5;
-            const float score = clampScore(values[offset + 4]);
-            if (score < config_.cup_score_threshold) {
-                continue;
-            }
-
-            Box cup = makeBoxFromValues(
-                values[offset + 0],
-                values[offset + 1],
-                values[offset + 2],
-                values[offset + 3],
-                frame.width,
-                frame.height);
-            cup.score = score;
-            cup.label = "cup(class_unknown)";
-            result.cups.push_back(cup);
-            ++parsed_boxes;
-        }
-    }
-
-    if (!result.cups.empty()) {
-        result.valid = true;
-        result.cup_box = *std::max_element(
-            result.cups.begin(),
-            result.cups.end(),
-            [](const Box& lhs, const Box& rhs) {
-                return lhs.score < rhs.score;
-            });
-        inverseTransformCupResult(result, frame);
-
-        std::ostringstream oss;
-        oss << "cup_flat_boxes_no_class_id,boxes=" << parsed_boxes
-            << ",best_score=" << result.cup_box.score
-            << ",coords=" << (frame.transform.valid ? "source_after_resize_inverse" : "model_input");
-        result.message = oss.str();
-        return result;
-    }
-
     result.message = "cup_output_no_box_over_threshold";
-
     return result;
 }
-
 CupResult CupModel::fallbackInfer(const Frame& frame) const {
     CupResult result;
     result.frame_id = frame.id;

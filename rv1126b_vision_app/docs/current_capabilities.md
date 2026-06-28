@@ -44,6 +44,13 @@ C:\Users\AgiUser\Desktop\代码\6.27\rv1126b\rv1126b_vision_app
 
 注意：`src/main.cpp` 中还保留 `posture_drink_model_path = "/userdata/models/posture_drink.rknn"`，但当前配置为 `use_three_model_pipeline = true`、`use_legacy_posture_drink_model = false`，比赛主线应以手势、姿态、水杯三模型为准。
 
+饮品检测当前支持两种 config profile：
+
+1. `CupModelProfile::Coco`：使用 `model/yolov8n_rv1126b_i8.rknn`，按 COCO class-aware YOLO 输出解析，只保留 `class_id=39/40/41`，分别对应 `bottle`、`wine_glass`、`cup`。
+2. `CupModelProfile::BottleBoxesOnly`：使用 `model/bottle_rv1126b_i8.rknn`，按 boxes-only 输出解析；模型不输出类别，不做 class_id 过滤，所有有效框默认作为 bottle，`label=bottle(box_only)`，`class_id=-1`。
+
+切换方式是在配置中修改：`config.cup_model_profile = CupModelProfile::Coco;` 或 `config.cup_model_profile = CupModelProfile::BottleBoxesOnly;`，然后调用 `applyCupModelProfile(config)`。当前比赛建议使用 `BottleBoxesOnly`。
+
 ## 4. 主程序编译命令
 
 比赛演示编译命令：

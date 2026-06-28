@@ -95,6 +95,16 @@ enum class WebStreamProtocol {
     HttpFlv
 };
 
+enum class CupModelProfile {
+    Coco,
+    BottleBoxesOnly
+};
+
+enum class CupOutputMode {
+    CocoClassAware,
+    BottleBoxesOnly
+};
+
 inline const char* toString(SystemState state) {
     switch (state) {
         case SystemState::Idle:
@@ -164,6 +174,13 @@ struct AppConfig {
     std::string gesture_model_path;
     std::string pose_model_path;
     std::string cup_model_path;
+    CupModelProfile cup_model_profile{CupModelProfile::Coco};
+    CupOutputMode cup_output_mode{CupOutputMode::CocoClassAware};
+    std::size_t cup_class_count{80};
+    std::vector<int> cup_class_ids{39, 40, 41};
+    std::string cup_box_only_label{"bottle(box_only)"};
+    int cup_box_only_class_id{-1};
+    bool cup_box_only_has_score{true};
     std::string posture_drink_model_path;
     bool use_legacy_posture_drink_model{true};
     bool use_three_model_pipeline{false};
@@ -220,6 +237,62 @@ struct AppConfig {
     int st7789_gpio_reset{23};
     int st7789_gpio_backlight{25};
 };
+
+
+inline const char* cupModelProfileName(CupModelProfile profile) {
+    switch (profile) {
+        case CupModelProfile::Coco:
+            return "coco";
+        case CupModelProfile::BottleBoxesOnly:
+            return "bottle_boxes_only";
+    }
+    return "unknown";
+}
+
+inline const char* cupOutputModeName(CupOutputMode mode) {
+    switch (mode) {
+        case CupOutputMode::CocoClassAware:
+            return "class_aware";
+        case CupOutputMode::BottleBoxesOnly:
+            return "boxes_only";
+    }
+    return "unknown";
+}
+
+inline std::string cupClassIdsForConfigLog(const AppConfig& config) {
+    if (config.cup_output_mode == CupOutputMode::BottleBoxesOnly || config.cup_class_ids.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < config.cup_class_ids.size(); ++i) {
+        if (i > 0) {
+            oss << "|";
+        }
+        oss << config.cup_class_ids[i];
+    }
+    return oss.str();
+}
+
+inline void applyCupModelProfile(AppConfig& config) {
+    config.cup_box_only_label = "bottle(box_only)";
+    config.cup_box_only_class_id = -1;
+    config.cup_box_only_has_score = true;
+
+    switch (config.cup_model_profile) {
+        case CupModelProfile::Coco:
+            config.cup_output_mode = CupOutputMode::CocoClassAware;
+            config.cup_model_path = "model/yolov8n_rv1126b_i8.rknn";
+            config.cup_class_count = 80;
+            config.cup_class_ids = {39, 40, 41};
+            break;
+        case CupModelProfile::BottleBoxesOnly:
+            config.cup_output_mode = CupOutputMode::BottleBoxesOnly;
+            config.cup_model_path = "model/bottle_rv1126b_i8.rknn";
+            config.cup_class_count = 0;
+            config.cup_class_ids.clear();
+            break;
+    }
+}
 
 struct CropRect {
     int x{0};
