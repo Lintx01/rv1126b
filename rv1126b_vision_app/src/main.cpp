@@ -113,7 +113,7 @@ int main(int argc, char* argv[]) {
     config.gesture_score_threshold = 0.60F;
 
     config.pose_model_path = "model/yolov8n-pose-rv1126b-i8.rknn";
-    config.cup_model_profile = rv1126b::CupModelProfile::BottleBoxesOnly;
+    config.cup_model_profile = rv1126b::CupModelProfile::Coco;
     rv1126b::applyCupModelProfile(config);
     config.use_three_model_pipeline = true;
     config.use_legacy_posture_drink_model = false;
@@ -124,10 +124,9 @@ int main(int argc, char* argv[]) {
 
     config.posture_drink_model_path = "/userdata/models/posture_drink.rknn";
     config.bad_posture_threshold = 0.60F;
-    config.cup_score_threshold = 0.50F;
+    config.cup_score_threshold = 0.05F;
     config.drink_distance_threshold = 120.0F;
-    config.drink_distance_norm_threshold = 0.40F;
-    config.drink_consecutive_hits = 3;
+    config.drink_consecutive_hits = 2;
     config.drink_timer_reminder_enabled = true;
     config.drink_timer_interval_ms = 30 * 60 * 1000;
     config.drink_timer_repeat_ms = 5 * 60 * 1000;

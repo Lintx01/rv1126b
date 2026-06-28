@@ -195,8 +195,7 @@ struct AppConfig {
     float bad_posture_threshold{0.60F};
     float cup_score_threshold{0.50F};
     float drink_distance_threshold{120.0F};
-    float drink_distance_norm_threshold{0.40F};
-    int drink_consecutive_hits{3};
+    int drink_consecutive_hits{2};
     int cup_output_debug_dump_frames{1};
     int cup_output_debug_dump_values{80};
     std::size_t cup_max_output_boxes{5};

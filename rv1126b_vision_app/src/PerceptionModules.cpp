@@ -19,6 +19,8 @@ namespace {
 constexpr std::size_t kPoseKeypointCount = 17;
 constexpr std::size_t kPoseCandidateStride = 5 + kPoseKeypointCount * 3;
 constexpr std::size_t kNose = 0;
+constexpr std::size_t kLeftEye = 1;
+constexpr std::size_t kRightEye = 2;
 constexpr std::size_t kLeftEar = 3;
 constexpr std::size_t kRightEar = 4;
 constexpr std::size_t kLeftShoulder = 5;
@@ -1254,17 +1256,18 @@ bool classifyFront45Rules(
     return true;
 }
 
-// 喝水判断优先使用鼻尖作为头部位置；鼻尖不可见时，用左右耳可见点的平均位置兜底。
-bool selectHeadPoint(const PoseResult& pose, float min_confidence, Point& head) {
+// Drink detection uses the nose first; when it is unavailable, visible eyes provide the face point.
+bool selectDrinkFacePoint(const PoseResult& pose, float min_confidence, Point& face_point, const char*& source) {
     if (visible(pose.keypoints[kNose], min_confidence)) {
-        head = Point{pose.keypoints[kNose].x, pose.keypoints[kNose].y};
+        face_point = Point{pose.keypoints[kNose].x, pose.keypoints[kNose].y};
+        source = "鼻子";
         return true;
     }
 
     float x_sum = 0.0F;
     float y_sum = 0.0F;
     int count = 0;
-    for (std::size_t index : {kLeftEar, kRightEar}) {
+    for (std::size_t index : {kLeftEye, kRightEye}) {
         if (!visible(pose.keypoints[index], min_confidence)) {
             continue;
         }
@@ -1277,8 +1280,29 @@ bool selectHeadPoint(const PoseResult& pose, float min_confidence, Point& head) 
         return false;
     }
 
-    head = Point{x_sum / static_cast<float>(count), y_sum / static_cast<float>(count)};
+    face_point = Point{x_sum / static_cast<float>(count), y_sum / static_cast<float>(count)};
+    source = (count == 2) ? "双眼中点" : "单眼";
     return true;
+}
+
+Point closestShortSideMidpoint(const Box& box, const Point& target) {
+    Point first;
+    Point second;
+    if (box.w <= box.h) {
+        first = Point{box.x + box.w * 0.5F, box.y};
+        second = Point{box.x + box.w * 0.5F, box.y + box.h};
+    } else {
+        first = Point{box.x, box.y + box.h * 0.5F};
+        second = Point{box.x + box.w, box.y + box.h * 0.5F};
+    }
+
+    const float first_dx = first.x - target.x;
+    const float first_dy = first.y - target.y;
+    const float second_dx = second.x - target.x;
+    const float second_dy = second.y - target.y;
+    const float first_dist_sq = first_dx * first_dx + first_dy * first_dy;
+    const float second_dist_sq = second_dx * second_dx + second_dy * second_dy;
+    return first_dist_sq <= second_dist_sq ? first : second;
 }
 
 }  // namespace
@@ -1612,45 +1636,56 @@ void PostureAnalyzer::reset() {
 
 void DrinkDetector::configure(const AppConfig& config) {
     keypoint_score_threshold_ = config.pose_keypoint_score_threshold;
-    drink_distance_norm_threshold_ = config.drink_distance_norm_threshold;
+    drink_distance_threshold_ = config.drink_distance_threshold;
     drink_consecutive_hits_ = std::max(1, config.drink_consecutive_hits);
     consecutive_hits_ = 0;
-    std::cout << "[阈值][喝水事件] keypoint_score >= " << keypoint_score_threshold_
-              << "；杯子到头部归一化距离 <= " << drink_distance_norm_threshold_
-              << " 连续 " << drink_consecutive_hits_ << " 次判 DRINK_DETECTED；有杯但距离更远判 NEED_REMIND\n";
+    std::cout << "[喝水检测] 关键点置信度 >= " << keypoint_score_threshold_
+              << "，杯子近脸短边中点距离 <= " << drink_distance_threshold_ << "px"
+              << "，连续命中 " << drink_consecutive_hits_ << " 次判定喝水\n";
 }
 
 DrinkState DrinkDetector::update(const PoseResult& pose, const CupResult& cups) {
     if (!pose.valid || !pose.has_person || !cups.valid || cups.cups.empty()) {
         consecutive_hits_ = 0;
+        std::cout << "[喝水检测] 状态=正常，原因=人体或杯子结果缺失\n";
         return DrinkState::NORMAL;
     }
 
-    Point head;
-    if (!selectHeadPoint(pose, keypoint_score_threshold_, head)) {
+    Point face_point;
+    const char* face_source = "无";
+    if (!selectDrinkFacePoint(pose, keypoint_score_threshold_, face_point, face_source)) {
         consecutive_hits_ = 0;
+        std::cout << "[喝水检测] 状态=正常，原因=没有可用鼻子或眼睛关键点"
+                  << "，关键点阈值=" << keypoint_score_threshold_ << "\n";
         return DrinkState::NORMAL;
     }
 
-    const float person_diag = std::max(
-        1.0F,
-        std::sqrt(
-            pose.person_box.w * pose.person_box.w +
-            pose.person_box.h * pose.person_box.h));
-
-    float best_norm_distance = std::numeric_limits<float>::max();
+    float best_distance = std::numeric_limits<float>::max();
+    Point best_cup_point{};
     for (const Box& cup : cups.cups) {
-        const Point cup_center{cup.x + cup.w * 0.5F, cup.y + cup.h * 0.5F};
-        const float dx = cup_center.x - head.x;
-        const float dy = cup_center.y - head.y;
+        const Point cup_point = closestShortSideMidpoint(cup, face_point);
+        const float dx = cup_point.x - face_point.x;
+        const float dy = cup_point.y - face_point.y;
         const float distance = std::sqrt(dx * dx + dy * dy);
-        best_norm_distance = std::min(best_norm_distance, distance / person_diag);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best_cup_point = cup_point;
+        }
     }
 
-    // 用人体框对角线归一化距离，避免固定像素阈值受摄像头距离和分辨率影响过大。
-    // 连续命中达到配置次数后才认为正在喝水，减少单帧误检。
-    if (best_norm_distance <= drink_distance_norm_threshold_) {
+    // Use absolute pixel distance from the cup edge closest to the face point.
+    // Consecutive hits are still required to reduce single-frame false positives.
+    if (best_distance <= drink_distance_threshold_) {
         ++consecutive_hits_;
+        std::cout << std::fixed << std::setprecision(1)
+                  << "[喝水检测] 命中=是"
+                  << "，距离=" << best_distance << "px"
+                  << "，阈值=" << drink_distance_threshold_ << "px"
+                  << "，计数=" << consecutive_hits_ << "/" << drink_consecutive_hits_
+                  << "，人脸点来源=" << face_source
+                  << "，人脸点=" << face_point.x << "," << face_point.y
+                  << "，杯子近脸短边中点=" << best_cup_point.x << "," << best_cup_point.y
+                  << "\n";
         if (consecutive_hits_ >= drink_consecutive_hits_) {
             return DrinkState::DRINK_DETECTED;
         }
@@ -1658,6 +1693,15 @@ DrinkState DrinkDetector::update(const PoseResult& pose, const CupResult& cups) 
     }
 
     consecutive_hits_ = 0;
+    std::cout << std::fixed << std::setprecision(1)
+              << "[喝水检测] 命中=否"
+              << "，距离=" << best_distance << "px"
+              << "，阈值=" << drink_distance_threshold_ << "px"
+              << "，计数=0/" << drink_consecutive_hits_
+              << "，人脸点来源=" << face_source
+              << "，人脸点=" << face_point.x << "," << face_point.y
+              << "，杯子近脸短边中点=" << best_cup_point.x << "," << best_cup_point.y
+              << "，状态=需要提醒\n";
     return DrinkState::NEED_REMIND;
 }
 

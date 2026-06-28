@@ -109,8 +109,8 @@ public:
 
 private:
     float keypoint_score_threshold_{0.35F};
-    float drink_distance_norm_threshold_{0.40F};
-    int drink_consecutive_hits_{3};
+    float drink_distance_threshold_{120.0F};
+    int drink_consecutive_hits_{2};
     int consecutive_hits_{0};
 };
 

@@ -633,8 +633,8 @@ bool VisionApp::start() {
         std::cout << "[阈值][总览] gesture_prob=" << config_.gesture_score_threshold
                   << ", cup_score=" << config_.cup_score_threshold
                   << ", pose_keypoint=" << config_.pose_keypoint_score_threshold
-                  << ", drink_distance_norm=" << config_.drink_distance_norm_threshold
-                  << ", drink_consecutive_hits=" << config_.drink_consecutive_hits << "\n";
+                  << "，喝水距离阈值=" << config_.drink_distance_threshold << "px"
+                  << "，喝水连续命中=" << config_.drink_consecutive_hits << "\n";
         std::cout << std::fixed << std::setprecision(3)
                   << "[Config] gesture_score_threshold=" << config_.gesture_score_threshold << "\n";
         std::cout << "[Config] gesture_stable_required=" << config_.gesture_stable_required << "\n";
