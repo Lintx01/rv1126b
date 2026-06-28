@@ -683,6 +683,7 @@ bool VisionApp::start() {
             state_ = SystemState::Running;
             drink_detector_.reset();
             ai_scheduler_.reset();
+            resetDrinkTimer("running_start", nowMs());
             std::cout << "[State] initial Running by RV_FORCE_AI_RUNNING\n";
         } else {
             state_ = SystemState::Idle;
@@ -973,6 +974,7 @@ void VisionApp::aiLoop() {
                 publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "stop");
                 break;
             case GestureType::Confirm:
+                acknowledgeDrinkTimerByConfirm(now_ms);
                 publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "confirm");
                 break;
             case GestureType::Rock:
@@ -1091,6 +1093,7 @@ void VisionApp::aiLoop() {
         VisionResult result;
         PostureState posture_state = PostureState::UNKNOWN;
         DrinkState drink_state = DrinkState::NORMAL;
+        DrinkState visual_drink_state = DrinkState::NORMAL;
         bool has_result_to_publish = false;
         bool need_legacy_fallback = false;
 
@@ -1227,6 +1230,8 @@ void VisionApp::aiLoop() {
                                   << "\n";
                     }
                 }
+                visual_drink_state = drink_state;
+                drink_state = updateDrinkTimerAndCombine(visual_drink_state, nowMs());
                 result = composeVisionResult(last_pose_result, last_cup_result, posture_state, drink_state);
                 result.message += ",pipeline=three_model";
                 has_result_to_publish = true;
@@ -1243,11 +1248,13 @@ void VisionApp::aiLoop() {
                         cup_for_state.frame_id = frame->id;
                         cup_for_state.timestamp_ms = frame->timestamp_ms;
                     }
+                    visual_drink_state = DrinkState::NORMAL;
+                    drink_state = updateDrinkTimerAndCombine(visual_drink_state, nowMs());
                     result = composeVisionResult(
                         pose_for_state,
                         cup_for_state,
                         PostureState::UNKNOWN,
-                        DrinkState::NORMAL);
+                        drink_state);
                     result.message += ",pipeline=three_model_invalid";
                     std::cout << "[核心][判断] 三模型输出无有效结果，保持 posture=UNKNOWN/drink=NORMAL, frame="
                               << frame->id << "\n";
@@ -1285,6 +1292,11 @@ void VisionApp::aiLoop() {
                 posture_state = result.bad_posture ? PostureState::BAD_ALERT : PostureState::UNKNOWN;
                 drink_state = result.drink_detected ? DrinkState::DRINK_DETECTED :
                               (result.drink_reminder ? DrinkState::NEED_REMIND : DrinkState::NORMAL);
+                visual_drink_state = drink_state;
+                drink_state = updateDrinkTimerAndCombine(visual_drink_state, nowMs());
+                result.drink_detected = (drink_state == DrinkState::DRINK_DETECTED);
+                result.drink_reminder = (drink_state == DrinkState::NEED_REMIND);
+                result.message += ",drink_timer_combined=" + std::string(toString(drink_state));
                 std::cout << "[AI][模型] 调用 legacy_posture_drink(旧姿态饮水), frame=" << legacy_input.id
                           << ", input=" << legacy_input.width << "x" << legacy_input.height << "\n";
                 has_result_to_publish = true;
@@ -1297,7 +1309,7 @@ void VisionApp::aiLoop() {
 
         updateLatestVisionResult(result);
         web_.publishResult(result);
-        enqueueAlarmMessages(result);
+        enqueueAlarmMessages(result, visual_drink_state);
         publishDisplayState(&result, posture_state, drink_state, std::string());
     }
 }
@@ -1382,6 +1394,7 @@ void VisionApp::requestStartByGesture() {
         state_ = SystemState::Running;
         drink_detector_.reset();
         ai_scheduler_.reset();
+        resetDrinkTimer("running_start", nowMs());
         logStateTransition(from, SystemState::Running, "gesture(start)");
     }
 }
@@ -1395,11 +1408,108 @@ void VisionApp::requestStopByGesture() {
         state_ = SystemState::Idle;
         drink_detector_.reset();
         ai_scheduler_.reset();
+        pauseDrinkTimer("idle_stop");
         logStateTransition(SystemState::Stopping, SystemState::Idle, "stop complete");
     }
 }
 
-void VisionApp::enqueueAlarmMessages(const VisionResult& result) {
+void VisionApp::resetDrinkTimer(const char*, int64_t now_ms) {
+    if (!config_.drink_timer_reminder_enabled) {
+        return;
+    }
+    drink_timer_last_reset_ms_ = now_ms;
+    drink_timer_last_event_ms_ = 0;
+    drink_timer_active_ = false;
+    drink_timer_initialized_ = true;
+    std::cout << "[DrinkTimer] start/reset by running_start, interval_ms="
+              << config_.drink_timer_interval_ms << "\n";
+}
+
+void VisionApp::pauseDrinkTimer(const char*) {
+    if (!config_.drink_timer_reminder_enabled) {
+        return;
+    }
+    drink_timer_active_ = false;
+    drink_timer_last_event_ms_ = 0;
+    drink_timer_initialized_ = false;
+    std::cout << "[DrinkTimer] paused by idle_stop\n";
+}
+
+void VisionApp::clearDrinkTimerByDrinkDetected(int64_t now_ms) {
+    if (!config_.drink_timer_reminder_enabled || !config_.drink_timer_reset_on_drink_detected) {
+        return;
+    }
+    const bool should_log = drink_timer_active_ || drink_timer_last_event_ms_ != 0 ||
+        !drink_timer_initialized_ || (now_ms - drink_timer_last_reset_ms_) >= 1000;
+    drink_timer_active_ = false;
+    drink_timer_last_reset_ms_ = now_ms;
+    drink_timer_last_event_ms_ = 0;
+    drink_timer_initialized_ = true;
+    if (should_log) {
+        std::cout << "[DrinkTimer] cleared by drink_detected, next_interval_ms="
+                  << config_.drink_timer_interval_ms << "\n";
+    }
+}
+
+void VisionApp::acknowledgeDrinkTimerByConfirm(int64_t now_ms) {
+    if (!config_.drink_timer_reminder_enabled || !config_.drink_timer_confirm_ack_enabled ||
+        !drink_timer_active_) {
+        return;
+    }
+    drink_timer_active_ = false;
+    drink_timer_last_reset_ms_ = now_ms;
+    drink_timer_last_event_ms_ = 0;
+    drink_timer_initialized_ = true;
+    std::cout << "[DrinkTimer] acknowledged by confirm, next_interval_ms="
+              << config_.drink_timer_interval_ms << "\n";
+}
+
+void VisionApp::queueDrinkTimerReminderEvent() {
+    queueMqttEvent(config_, mqtt_queue_, "drink_timer_remind", "Time to drink water", false);
+}
+
+DrinkState VisionApp::updateDrinkTimerAndCombine(DrinkState visual_drink_state, int64_t now_ms) {
+    if (!config_.drink_timer_reminder_enabled || state_.load() != SystemState::Running) {
+        return visual_drink_state;
+    }
+
+    if (!drink_timer_initialized_) {
+        resetDrinkTimer("running_start", now_ms);
+    }
+
+    if (visual_drink_state == DrinkState::DRINK_DETECTED) {
+        clearDrinkTimerByDrinkDetected(now_ms);
+        return DrinkState::DRINK_DETECTED;
+    }
+
+    const int64_t interval_ms = std::max<int64_t>(0, config_.drink_timer_interval_ms);
+    const int64_t repeat_ms = std::max<int64_t>(0, config_.drink_timer_repeat_ms);
+    const int64_t elapsed_since_reset_ms = now_ms - drink_timer_last_reset_ms_;
+
+    if (!drink_timer_active_ && elapsed_since_reset_ms >= interval_ms) {
+        drink_timer_active_ = true;
+        drink_timer_last_event_ms_ = now_ms;
+        std::cout << "[DrinkTimer] due elapsed_ms=" << elapsed_since_reset_ms
+                  << ", interval_ms=" << interval_ms << "\n";
+        queueDrinkTimerReminderEvent();
+    } else if (drink_timer_active_ && repeat_ms > 0 &&
+               (drink_timer_last_event_ms_ == 0 || (now_ms - drink_timer_last_event_ms_) >= repeat_ms)) {
+        const int64_t elapsed_since_event_ms = drink_timer_last_event_ms_ == 0
+                                                  ? elapsed_since_reset_ms
+                                                  : now_ms - drink_timer_last_event_ms_;
+        drink_timer_last_event_ms_ = now_ms;
+        std::cout << "[DrinkTimer] repeat reminder elapsed_ms=" << elapsed_since_event_ms
+                  << ", repeat_ms=" << repeat_ms << "\n";
+        queueDrinkTimerReminderEvent();
+    }
+
+    if (drink_timer_active_) {
+        return DrinkState::NEED_REMIND;
+    }
+    return visual_drink_state;
+}
+
+void VisionApp::enqueueAlarmMessages(const VisionResult& result, DrinkState visual_drink_state) {
     if (!config_.enable_mqtt) {
         return;
     }
@@ -1408,7 +1518,7 @@ void VisionApp::enqueueAlarmMessages(const VisionResult& result) {
         queueMqttEvent(config_, mqtt_queue_, "bad_posture", "Please sit up", true);
     }
 
-    if (result.drink_reminder) {
+    if (visual_drink_state == DrinkState::NEED_REMIND) {
         queueMqttEvent(config_, mqtt_queue_, "drink_remind", "Time to drink water", true);
     }
 }

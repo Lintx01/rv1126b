@@ -17,7 +17,7 @@ C:\Users\AgiUser\Desktop\代码\6.27\rv1126b\rv1126b_vision_app
 * 摄像头采集：主程序默认使用 `/dev/video23`，默认帧尺寸为 `640x480`，目标帧率 `25fps`。
 * 手势模型：已接入手势 RKNN 模型，当前主程序默认模型路径为 `model/yolov5_gesture_rv1126b.rknn`，输入尺寸为 `224x224`。
 * 姿态模型：已接入姿态 RKNN 模型，当前主程序默认模型路径为 `model/yolov8n-pose-rv1126b-i8.rknn`，输入尺寸为 `640x640`。
-* 水杯模型：已接入水杯/饮品 RKNN 模型，当前主程序默认模型路径为 `model/yolov8n_rv1126b_i8.rknn`，输入尺寸为 `640x640`。
+* 水杯模型：已接入水杯/饮品 RKNN 模型，当前主程序默认使用 `CupModelProfile::BottleBoxesOnly`，模型路径为 `model/bottle_rv1126b_i8.rknn`，输入尺寸为 `640x640`。
 * MPP H.264 编码：主程序配置中 `enable_mpp_encoder = true`，用于输出 H.264 视频流。
 * 视频 overlay：当前使用轻量 NV12 Y 平面画框方式，不依赖 OpenCV，不做全帧颜色空间转换；只画 pose/cup 产生的 oxes，手势分类结果不会画框。
 * HTTP-FLV 输出：主程序当前设置 `web_stream_protocol = HttpFlv`，默认 Web 端口为 `8080`，用于输出 `http://<board_ip>:8080/live.flv`。
@@ -32,7 +32,7 @@ C:\Users\AgiUser\Desktop\代码\6.27\rv1126b\rv1126b_vision_app
 
 * `gesture_model_path`: `model/yolov5_gesture_rv1126b.rknn`
 * `pose_model_path`: `model/yolov8n-pose-rv1126b-i8.rknn`
-* `cup_model_path`: `model/yolov8n_rv1126b_i8.rknn`
+* `cup_model_path`: 当前由 `applyCupModelProfile(config)` 根据 `cup_model_profile` 设置；比赛默认 `BottleBoxesOnly` 为 `model/bottle_rv1126b_i8.rknn`。
 
 当前 `model/` 目录中可见文件：
 
@@ -51,7 +51,22 @@ C:\Users\AgiUser\Desktop\代码\6.27\rv1126b\rv1126b_vision_app
 
 切换方式是在配置中修改：`config.cup_model_profile = CupModelProfile::Coco;` 或 `config.cup_model_profile = CupModelProfile::BottleBoxesOnly;`，然后调用 `applyCupModelProfile(config)`。当前比赛建议使用 `BottleBoxesOnly`。
 
-## 4. 主程序编译命令
+## 4. 喝水提醒
+
+当前喝水提醒有两类来源：
+
+1. 视觉提醒：`DrinkDetector` 检测到有人和杯子/瓶子，但杯子/瓶子离头部较远时，视觉状态为 `NeedRemind`。
+2. 定时提醒：系统处于 `Running` 状态并持续达到 `drink_timer_interval_ms` 后，App 层触发定时喝水提醒，最终状态合成为 `NeedRemind`。
+
+定时提醒配置位于 `AppConfig`：`drink_timer_reminder_enabled`、`drink_timer_interval_ms`、`drink_timer_repeat_ms`、`drink_timer_reset_on_drink_detected`、`drink_timer_confirm_ack_enabled`。默认首次提醒间隔为 30 分钟，重复提醒间隔为 5 分钟；调试时可在 `src/main.cpp` 中把 `config.drink_timer_interval_ms` 改成 `15000`，把 `config.drink_timer_repeat_ms` 改成 `10000`。
+
+定时提醒只在 `Running` 状态工作，`Idle`/`Stop` 状态不提醒。检测到 `DrinkDetected` 后会清除 active timed reminder 并重新计时。`Confirm` 手势只有在 active timed reminder 存在时才确认并清除本次定时提醒；没有 active timed reminder 时，`Confirm` 仍只保留原有确认反馈，不影响视觉喝水判断。
+
+MQTT status 里的 `drink` 字段仍只使用 `normal` / `need_remind` / `drink_detected`。定时提醒事件名为 `drink_timer_remind`，视觉提醒事件仍为 `drink_remind`，消息文本均为 `Time to drink water`。
+
+ST7789/LVGL 显示上，定时提醒合成为 `NeedRemind` 后显示 `DrinkRemindFace`；`DrinkDetected` 显示 `DrinkOkFace`。Start/Stop/Rock/Confirm 临时表情优先级仍按现有显示状态机执行，临时表情期间不会强行覆盖。
+
+## 5. 主程序编译命令
 
 比赛演示编译命令：
 
@@ -83,7 +98,7 @@ cmake -S . -B build-check-off \
 cmake --build build-check-off -j2
 ```
 
-## 5. 主程序运行命令
+## 6. 主程序运行命令
 
 普通运行：
 
@@ -113,7 +128,7 @@ RV_PREPROCESS_MODE=rga \
 ./build-rtsp/rv1126b_vision_app
 ```
 
-## 6. 手势业务映射
+## 7. 手势业务映射
 
 当前统一手势阈值：`gesture_score_threshold = 0.6`。
 

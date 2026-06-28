@@ -34,7 +34,13 @@ private:
 
     void requestStartByGesture();
     void requestStopByGesture();
-    void enqueueAlarmMessages(const VisionResult& result);
+    void resetDrinkTimer(const char* reason, int64_t now_ms);
+    void pauseDrinkTimer(const char* reason);
+    void clearDrinkTimerByDrinkDetected(int64_t now_ms);
+    void acknowledgeDrinkTimerByConfirm(int64_t now_ms);
+    void queueDrinkTimerReminderEvent();
+    DrinkState updateDrinkTimerAndCombine(DrinkState visual_drink_state, int64_t now_ms);
+    void enqueueAlarmMessages(const VisionResult& result, DrinkState visual_drink_state);
     VisionResult composeVisionResult(
         const PoseResult& pose_result,
         const CupResult& cup_result,
@@ -109,6 +115,10 @@ private:
     std::atomic<bool> thread_error_{false};
     std::atomic<SystemState> state_{SystemState::Idle};
     std::mutex state_mutex_;
+    int64_t drink_timer_last_reset_ms_{0};
+    int64_t drink_timer_last_event_ms_{0};
+    bool drink_timer_active_{false};
+    bool drink_timer_initialized_{false};
     PerfCounters perf_;
 };
 

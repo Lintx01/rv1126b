@@ -128,6 +128,14 @@ int main(int argc, char* argv[]) {
     config.drink_distance_threshold = 120.0F;
     config.drink_distance_norm_threshold = 0.40F;
     config.drink_consecutive_hits = 3;
+    config.drink_timer_reminder_enabled = true;
+    config.drink_timer_interval_ms = 30 * 60 * 1000;
+    config.drink_timer_repeat_ms = 5 * 60 * 1000;
+    config.drink_timer_reset_on_drink_detected = true;
+    config.drink_timer_confirm_ack_enabled = true;
+    // 调试时可改成 15000 表示 15 秒提醒一次。
+    // config.drink_timer_interval_ms = 15000;
+    // config.drink_timer_repeat_ms = 10000;
     std::cout << "[Config][Cup] profile=" << rv1126b::cupModelProfileName(config.cup_model_profile)
               << ", model=" << config.cup_model_path
               << ", output_mode=" << rv1126b::cupOutputModeName(config.cup_output_mode)
@@ -136,11 +144,16 @@ int main(int argc, char* argv[]) {
         std::cout << ", label=" << config.cup_box_only_label;
     }
     std::cout << "\n";
+    std::cout << "[Config][DrinkTimer] enabled=" << (config.drink_timer_reminder_enabled ? 1 : 0)
+              << ", interval_ms=" << config.drink_timer_interval_ms
+              << ", repeat_ms=" << config.drink_timer_repeat_ms
+              << ", reset_on_drink_detected=" << (config.drink_timer_reset_on_drink_detected ? 1 : 0)
+              << ", confirm_ack=" << (config.drink_timer_confirm_ack_enabled ? 1 : 0) << "\n";
     config.debug_ai_delay_ms = 0;
 
-    config.enable_mqtt = false;
-    config.mqtt_host = "127.0.0.1";
-    config.mqtt_port = 1883;
+    config.enable_mqtt = true;
+    config.mqtt_host = "192.168.137.1";
+    config.mqtt_port = 1884;
     config.mqtt_client_id = "rv1126b-vision-node";
     config.mqtt_keepalive_seconds = 30;
     config.mqtt_reconnect_delay_ms = 1000;
