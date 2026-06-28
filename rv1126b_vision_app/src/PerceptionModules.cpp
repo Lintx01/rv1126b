@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -817,6 +818,128 @@ void decodeBottleBoxesOnlyFlat(
     }
 }
 
+
+bool isNearOne(float value) {
+    return std::isfinite(value) && std::fabs(value - 1.0F) <= 1.0e-4F;
+}
+
+void dumpStrideRows(const std::vector<float>& values, std::size_t stride, std::size_t max_rows) {
+    if (stride == 0 || values.size() < stride || values.size() % stride != 0) {
+        return;
+    }
+    const std::size_t rows = std::min(max_rows, values.size() / stride);
+    std::cout << "[CupModel][OutputDump] out0 as_stride" << stride << "_first" << rows << ":\n";
+    for (std::size_t row = 0; row < rows; ++row) {
+        const std::size_t offset = row * stride;
+        std::cout << "  row" << row << ":";
+        for (std::size_t col = 0; col < stride; ++col) {
+            const char name = static_cast<char>('a' + static_cast<char>(col));
+            std::cout << " " << name << "=" << values[offset + col];
+        }
+        std::cout << "\n";
+    }
+}
+
+void dumpBottleBoxesOnlyOutputs(const std::vector<std::vector<float>>& outputs, const AppConfig& config) {
+    static int dump_count = 0;
+    const int max_dump_frames = std::max(0, config.cup_output_debug_dump_frames);
+    if (dump_count >= max_dump_frames) {
+        return;
+    }
+    ++dump_count;
+
+    const std::size_t max_values = static_cast<std::size_t>(std::max(0, config.cup_output_debug_dump_values));
+    const std::ios::fmtflags old_flags = std::cout.flags();
+    const std::streamsize old_precision = std::cout.precision();
+    std::cout << "[CupModel][OutputDump] mode=boxes_only, output_count=" << outputs.size() << "\n";
+    for (std::size_t output_index = 0; output_index < outputs.size(); ++output_index) {
+        const auto& values = outputs[output_index];
+        float min_value = 0.0F;
+        float max_value = 0.0F;
+        double sum = 0.0;
+        std::size_t near_one_count = 0;
+        if (!values.empty()) {
+            min_value = values.front();
+            max_value = values.front();
+            for (float value : values) {
+                min_value = std::min(min_value, value);
+                max_value = std::max(max_value, value);
+                sum += static_cast<double>(value);
+                if (isNearOne(value)) {
+                    ++near_one_count;
+                }
+            }
+        }
+        const double mean = values.empty() ? 0.0 : sum / static_cast<double>(values.size());
+        const double near_one_ratio = values.empty()
+                                          ? 0.0
+                                          : static_cast<double>(near_one_count) / static_cast<double>(values.size());
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[CupModel][OutputDump] out" << output_index
+                  << " size=" << values.size()
+                  << ", min=" << min_value
+                  << ", max=" << max_value
+                  << ", mean=" << mean
+                  << ", near_one_count=" << near_one_count
+                  << ", near_one_ratio=" << near_one_ratio << "\n";
+
+        const std::size_t first_count = std::min(max_values, values.size());
+        std::cout << "[CupModel][OutputDump] out" << output_index << " first" << first_count << "=";
+        for (std::size_t i = 0; i < first_count; ++i) {
+            if (i > 0) {
+                std::cout << ",";
+            }
+            std::cout << values[i];
+        }
+        std::cout << "\n";
+
+        if (output_index == 0) {
+            dumpStrideRows(values, 5, 10);
+            dumpStrideRows(values, 4, 10);
+        }
+
+        const bool divisible_by_5 = !values.empty() && values.size() % 5 == 0;
+        const bool divisible_by_4 = !values.empty() && values.size() % 4 == 0;
+        std::cout << "[CupModel][FormatHint] out" << output_index
+                  << "_size=" << values.size()
+                  << ", divisible_by_5=" << (divisible_by_5 ? 1 : 0)
+                  << ", divisible_by_4=" << (divisible_by_4 ? 1 : 0) << "\n";
+        if (divisible_by_5) {
+            const std::size_t stride5_candidates = values.size() / 5;
+            std::cout << "[CupModel][FormatHint] candidates_if_stride5=" << stride5_candidates << "\n";
+            if (stride5_candidates > 500) {
+                std::cout << "[CupModel][FormatHint][WARN] boxes-only output has too many candidates; verify this is not raw YOLO output\n";
+            }
+            std::size_t stride5_score_near_one_count = 0;
+            for (std::size_t row = 0; row < stride5_candidates; ++row) {
+                if (isNearOne(values[row * 5 + 4])) {
+                    ++stride5_score_near_one_count;
+                }
+            }
+            const double stride5_score_near_one_ratio =
+                stride5_candidates == 0 ? 0.0 :
+                static_cast<double>(stride5_score_near_one_count) / static_cast<double>(stride5_candidates);
+            std::cout << "[CupModel][FormatHint] stride5_score_near_one_count="
+                      << stride5_score_near_one_count
+                      << ", stride5_score_near_one_ratio=" << stride5_score_near_one_ratio << "\n";
+            if (stride5_score_near_one_ratio > 0.20) {
+                std::cout << "[CupModel][FormatHint][WARN] many scores are near 1.0; score column may be parsed incorrectly\n";
+            }
+        }
+        if (divisible_by_4) {
+            const std::size_t stride4_candidates = values.size() / 4;
+            std::cout << "[CupModel][FormatHint] candidates_if_stride4=" << stride4_candidates << "\n";
+            if (stride4_candidates > 500) {
+                std::cout << "[CupModel][FormatHint][WARN] boxes-only output has too many candidates; verify this is not raw YOLO output\n";
+            }
+        }
+        if (near_one_ratio > 0.20) {
+            std::cout << "[CupModel][FormatHint][WARN] many float values are near 1.0; verify score parsing\n";
+        }
+    }
+    std::cout.flags(old_flags);
+    std::cout.precision(old_precision);
+}
 BottleBoxesOnlyDecodeInfo decodeBottleBoxesOnlyOutputs(
     const std::vector<std::vector<float>>& outputs,
     const Frame& frame,
@@ -1274,6 +1397,7 @@ CupResult CupModel::parseOutput(const Frame& frame, const std::vector<std::vecto
     std::string format;
 
     if (config_.cup_output_mode == CupOutputMode::BottleBoxesOnly) {
+        dumpBottleBoxesOnlyOutputs(outputs, config_);
         BottleBoxesOnlyDecodeInfo info = decodeBottleBoxesOnlyOutputs(outputs, frame, config_, candidates);
         if (info.decoded) {
             parser_name = "bottle_boxes_only_decoder";

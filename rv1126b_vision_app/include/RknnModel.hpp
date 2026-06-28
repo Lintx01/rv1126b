@@ -13,8 +13,15 @@ namespace rv1126b {
 struct RknnTensorInfo {
     uint32_t index{0};
     std::string name;
+    uint32_t n_dims{0};
     std::vector<uint32_t> dims;
+    uint32_t n_elems{0};
     uint32_t size{0};
+    int fmt{0};
+    int type{0};
+    int qnt_type{0};
+    int zp{0};
+    float scale{0.0F};
 };
 
 class RknnModel {

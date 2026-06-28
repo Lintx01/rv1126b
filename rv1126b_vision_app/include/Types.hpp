@@ -197,6 +197,8 @@ struct AppConfig {
     float drink_distance_threshold{120.0F};
     float drink_distance_norm_threshold{0.40F};
     int drink_consecutive_hits{3};
+    int cup_output_debug_dump_frames{1};
+    int cup_output_debug_dump_values{80};
     bool drink_timer_reminder_enabled{true};
     int drink_timer_interval_ms{30 * 60 * 1000};
     int drink_timer_repeat_ms{5 * 60 * 1000};

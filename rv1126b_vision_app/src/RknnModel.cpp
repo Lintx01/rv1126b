@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <utility>
 
 #if defined(RV1126B_HAS_RKNN)
@@ -11,6 +12,23 @@
 #endif
 
 namespace rv1126b {
+
+namespace {
+
+std::string dimsToString(const std::vector<uint32_t>& dims) {
+    std::ostringstream oss;
+    oss << "[";
+    for (std::size_t i = 0; i < dims.size(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << dims[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+}  // namespace
 
 struct RknnModel::Impl {
 #if defined(RV1126B_HAS_RKNN)
@@ -74,7 +92,14 @@ bool RknnModel::load(const std::string& model_path) {
         RknnTensorInfo info;
         info.index = i;
         info.name = attr.name;
+        info.n_dims = attr.n_dims;
+        info.n_elems = attr.n_elems;
         info.size = attr.size;
+        info.fmt = static_cast<int>(attr.fmt);
+        info.type = static_cast<int>(attr.type);
+        info.qnt_type = static_cast<int>(attr.qnt_type);
+        info.zp = attr.zp;
+        info.scale = attr.scale;
         for (uint32_t d = 0; d < attr.n_dims; ++d) {
             info.dims.push_back(static_cast<uint32_t>(attr.dims[d]));
         }
@@ -94,7 +119,14 @@ bool RknnModel::load(const std::string& model_path) {
         RknnTensorInfo info;
         info.index = i;
         info.name = attr.name;
+        info.n_dims = attr.n_dims;
+        info.n_elems = attr.n_elems;
         info.size = attr.size;
+        info.fmt = static_cast<int>(attr.fmt);
+        info.type = static_cast<int>(attr.type);
+        info.qnt_type = static_cast<int>(attr.qnt_type);
+        info.zp = attr.zp;
+        info.scale = attr.scale;
         for (uint32_t d = 0; d < attr.n_dims; ++d) {
             info.dims.push_back(static_cast<uint32_t>(attr.dims[d]));
         }
@@ -106,6 +138,21 @@ bool RknnModel::load(const std::string& model_path) {
     std::cout << "[RKNN] model loaded: " << model_path
               << ", inputs=" << impl_->input_infos.size()
               << ", outputs=" << impl_->output_infos.size() << "\n";
+    std::cout << "[RKNN][OutputAttr] model=" << model_path
+              << ", outputs=" << impl_->output_infos.size() << "\n";
+    for (const auto& info : impl_->output_infos) {
+        std::cout << "[RKNN][OutputAttr] idx=" << info.index
+                  << ", name=" << info.name
+                  << ", n_dims=" << info.n_dims
+                  << ", dims=" << dimsToString(info.dims)
+                  << ", n_elems=" << info.n_elems
+                  << ", size=" << info.size
+                  << ", fmt=" << info.fmt
+                  << ", type=" << info.type
+                  << ", qnt_type=" << info.qnt_type
+                  << ", zp=" << info.zp
+                  << ", scale=" << info.scale << "\n";
+    }
     return true;
 #else
     (void)model_data;
