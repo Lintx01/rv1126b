@@ -69,8 +69,8 @@ rv1126b::AppConfig makeDebugConfig() {
     config.gesture_score_threshold = 0.60F;
     config.pose_keypoint_score_threshold = 0.35F;
     config.cup_score_threshold = 0.50F;
-    config.drink_distance_norm_threshold = 0.40F;
-    config.drink_consecutive_hits = 3;
+    config.drink_distance_threshold = 120.0F;
+    config.drink_consecutive_hits = 2;
     return config;
 }
 
@@ -181,40 +181,81 @@ std::string applyPreprocessMode(rv1126b::AppConfig& config) {
     }
     return "default";
 }
-float estimateDrinkDistanceNorm(const rv1126b::PoseResult& pose, const rv1126b::CupResult& cup, float threshold) {
+bool selectDrinkFacePoint(
+    const rv1126b::PoseResult& pose,
+    float threshold,
+    rv1126b::Point& face_point,
+    const char*& source) {
+    constexpr std::size_t kNose = 0;
+    constexpr std::size_t kLeftEye = 1;
+    constexpr std::size_t kRightEye = 2;
+
+    if (pose.keypoints[kNose].score >= threshold) {
+        face_point = rv1126b::Point{pose.keypoints[kNose].x, pose.keypoints[kNose].y};
+        source = "鼻子";
+        return true;
+    }
+
+    float x_sum = 0.0F;
+    float y_sum = 0.0F;
+    int count = 0;
+    for (std::size_t index : {kLeftEye, kRightEye}) {
+        const auto& point = pose.keypoints[index];
+        if (point.score < threshold) {
+            continue;
+        }
+        x_sum += point.x;
+        y_sum += point.y;
+        ++count;
+    }
+
+    if (count == 0) {
+        return false;
+    }
+
+    face_point = rv1126b::Point{x_sum / static_cast<float>(count), y_sum / static_cast<float>(count)};
+    source = (count == 2) ? "双眼中点" : "单眼";
+    return true;
+}
+
+rv1126b::Point closestShortSideMidpoint(const rv1126b::Box& box, const rv1126b::Point& target) {
+    rv1126b::Point first;
+    rv1126b::Point second;
+    if (box.w <= box.h) {
+        first = rv1126b::Point{box.x + box.w * 0.5F, box.y};
+        second = rv1126b::Point{box.x + box.w * 0.5F, box.y + box.h};
+    } else {
+        first = rv1126b::Point{box.x, box.y + box.h * 0.5F};
+        second = rv1126b::Point{box.x + box.w, box.y + box.h * 0.5F};
+    }
+
+    const float first_dx = first.x - target.x;
+    const float first_dy = first.y - target.y;
+    const float second_dx = second.x - target.x;
+    const float second_dy = second.y - target.y;
+    const float first_dist_sq = first_dx * first_dx + first_dy * first_dy;
+    const float second_dist_sq = second_dx * second_dx + second_dy * second_dy;
+    return first_dist_sq <= second_dist_sq ? first : second;
+}
+
+float estimateDrinkDistancePx(const rv1126b::PoseResult& pose, const rv1126b::CupResult& cup, float threshold) {
     if (!pose.valid || !pose.has_person || !cup.valid || cup.cups.empty()) {
         return std::numeric_limits<float>::quiet_NaN();
     }
 
-    const std::array<int, 3> head_indices{0, 3, 4};
-    float x_sum = 0.0F;
-    float y_sum = 0.0F;
-    int count = 0;
-    for (const int index : head_indices) {
-        const auto& point = pose.keypoints[static_cast<std::size_t>(index)];
-        if (point.score >= threshold) {
-            x_sum += point.x;
-            y_sum += point.y;
-            ++count;
-        }
-    }
-    if (count == 0) {
+    rv1126b::Point face_point;
+    const char* face_source = "无";
+    if (!selectDrinkFacePoint(pose, threshold, face_point, face_source)) {
         return std::numeric_limits<float>::quiet_NaN();
     }
-
-    const float head_x = x_sum / static_cast<float>(count);
-    const float head_y = y_sum / static_cast<float>(count);
-    const float diag = std::max(
-        1.0F,
-        std::sqrt(pose.person_box.w * pose.person_box.w + pose.person_box.h * pose.person_box.h));
+    (void)face_source;
 
     float best = std::numeric_limits<float>::max();
     for (const auto& box : cup.cups) {
-        const float cx = box.x + box.w * 0.5F;
-        const float cy = box.y + box.h * 0.5F;
-        const float dx = cx - head_x;
-        const float dy = cy - head_y;
-        best = std::min(best, std::sqrt(dx * dx + dy * dy) / diag);
+        const rv1126b::Point cup_point = closestShortSideMidpoint(box, face_point);
+        const float dx = cup_point.x - face_point.x;
+        const float dy = cup_point.y - face_point.y;
+        best = std::min(best, std::sqrt(dx * dx + dy * dy));
     }
     return best;
 }
@@ -587,7 +628,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < config.drink_consecutive_hits; ++i) {
         drink = drink_detector.update(pose, cup);
     }
-    const float distance_norm = estimateDrinkDistanceNorm(pose, cup, config.pose_keypoint_score_threshold);
+    const float distance_px = estimateDrinkDistancePx(pose, cup, config.pose_keypoint_score_threshold);
 
     std::cout << std::boolalpha;
     std::cout << "========== IMAGE ==========\n";
@@ -608,12 +649,12 @@ int main(int argc, char** argv) {
     std::cout << "\n========== DRINK ==========\n";
     std::cout << "drink_state=" << drinkText(drink) << "\n";
     std::cout << "distance_rule_result=";
-    if (std::isnan(distance_norm)) {
+    if (std::isnan(distance_px)) {
         std::cout << "unavailable";
     } else {
-        std::cout << std::fixed << std::setprecision(3) << distance_norm
-                  << (distance_norm <= config.drink_distance_norm_threshold ? " <= " : " > ")
-                  << config.drink_distance_norm_threshold;
+        std::cout << std::fixed << std::setprecision(1) << distance_px << "px"
+                  << (distance_px <= config.drink_distance_threshold ? " <= " : " > ")
+                  << config.drink_distance_threshold << "px";
     }
     std::cout << "\n";
 
