@@ -562,20 +562,21 @@ inline DisplayFace selectDisplayFace(const AppState& state) {
         return DisplayFace::GestureOkFace;
     }
 
-    if (state.device_mode == DeviceMode::Standby) {
-        return DisplayFace::SleepFace;
-    }
-
+    // 展示优先级：告警优先于待机；喝水成功反馈优先保留；坐姿异常比饮水提醒更紧急。
     if (state.drink_state == DrinkState::DrinkDetected) {
         return DisplayFace::DrinkOkFace;
+    }
+
+    if (state.posture_state == PostureState::BadAlert || state.posture_alert) {
+        return DisplayFace::BadPostureFace;
     }
 
     if (state.drink_state == DrinkState::NeedRemind || state.drink_alert) {
         return DisplayFace::DrinkRemindFace;
     }
 
-    if (state.posture_state == PostureState::BadAlert || state.posture_alert) {
-        return DisplayFace::BadPostureFace;
+    if (state.device_mode == DeviceMode::Standby) {
+        return DisplayFace::SleepFace;
     }
 
     return DisplayFace::NormalFace;
