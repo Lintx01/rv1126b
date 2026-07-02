@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -34,11 +35,14 @@ private:
 
     void requestStartByGesture();
     void requestStopByGesture();
+    void acknowledgePostureAlertByGesture(const char* gesture_name, int64_t now_ms);
+    bool isPostureAlertSilenced(int64_t now_ms) const;
     void resetDrinkTimer(const char* reason, int64_t now_ms);
     void pauseDrinkTimer(const char* reason);
     void clearDrinkTimerByDrinkDetected(int64_t now_ms);
     void acknowledgeDrinkTimerByConfirm(int64_t now_ms);
     void queueDrinkTimerReminderEvent();
+    std::string drinkReminderCountdownText(int64_t now_ms) const;
     DrinkState updateDrinkTimerAndCombine(DrinkState visual_drink_state, int64_t now_ms);
     void enqueueAlarmMessages(const VisionResult& result, DrinkState visual_drink_state);
     VisionResult composeVisionResult(
@@ -64,10 +68,28 @@ private:
     struct PerfStat {
         std::atomic<uint64_t> count{0};
         std::atomic<uint64_t> total_us{0};
+        std::atomic<uint64_t> min_us{std::numeric_limits<uint64_t>::max()};
+        std::atomic<uint64_t> max_us{0};
 
         void addSample(uint64_t duration_us) {
             count.fetch_add(1, std::memory_order_relaxed);
             total_us.fetch_add(duration_us, std::memory_order_relaxed);
+
+            uint64_t old_min = min_us.load(std::memory_order_relaxed);
+            while (duration_us < old_min &&
+                   !min_us.compare_exchange_weak(
+                       old_min,
+                       duration_us,
+                       std::memory_order_relaxed)) {
+            }
+
+            uint64_t old_max = max_us.load(std::memory_order_relaxed);
+            while (duration_us > old_max &&
+                   !max_us.compare_exchange_weak(
+                       old_max,
+                       duration_us,
+                       std::memory_order_relaxed)) {
+            }
         }
     };
 
@@ -75,9 +97,13 @@ private:
         std::atomic<uint64_t> camera_frames{0};
         std::atomic<uint64_t> encoder_frames{0};
         std::atomic<uint64_t> ai_iterations{0};
+        PerfStat ai_total;
+        PerfStat ai_perception;
+        PerfStat ai_preprocess;
         PerfStat gesture_infer;
         PerfStat pose_infer;
         PerfStat cup_infer;
+        PerfStat legacy_infer;
         PerfStat overlay;
         PerfStat mpp_encode;
         PerfStat display_show;
@@ -119,6 +145,7 @@ private:
     int64_t drink_timer_last_event_ms_{0};
     bool drink_timer_active_{false};
     bool drink_timer_initialized_{false};
+    int64_t posture_alert_silenced_until_ms_{0};
     PerfCounters perf_;
 };
 

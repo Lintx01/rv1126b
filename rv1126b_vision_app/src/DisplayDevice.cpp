@@ -419,6 +419,7 @@ void DisplayDevice::showFace(DisplayFace face) {
             lvgl_ui_->dot_three = create_dot(136);
 
             idle_clock_visible_ = false;
+            lvgl_face_page_visible_ = true;
             startFaceAnimation(face);
             (void)lv_timer_handler();
             return;
@@ -507,7 +508,7 @@ void DisplayDevice::showFace(DisplayFace face) {
 
 void DisplayDevice::tick() {
     if (!config_.enable_display || !config_.enable_lvgl_display ||
-        (!config_.lvgl_idle_only_test && !idle_clock_visible_ && !animation_active_)) {
+        (!config_.lvgl_idle_only_test && !idle_clock_visible_ && !lvgl_face_page_visible_ && !animation_active_)) {
         return;
     }
 
@@ -548,6 +549,7 @@ void DisplayDevice::showIdleClock() {
     }
     updateIdleClock(true);
     idle_clock_visible_ = true;
+    lvgl_face_page_visible_ = false;
     startFaceAnimation(DisplayFace::IDLE_CLOCK);
     (void)lv_timer_handler();
 #else
@@ -603,6 +605,7 @@ void DisplayDevice::close() {
     lvgl_time_warning_printed_ = false;
     lvgl_time_status_printed_ = false;
     idle_clock_visible_ = false;
+    lvgl_face_page_visible_ = false;
     idle_clock_last_second_ = -1;
     idle_clock_last_update_ms_ = 0;
     lvgl_last_tick_ms_ = 0;
@@ -656,6 +659,7 @@ bool DisplayDevice::ensureLvglInitialized() {
     }
     updateIdleClock(true);
     idle_clock_visible_ = true;
+    lvgl_face_page_visible_ = false;
     startFaceAnimation(DisplayFace::IDLE_CLOCK);
     return true;
 #else
@@ -669,6 +673,7 @@ bool DisplayDevice::ensureLvglInitialized() {
 
 void DisplayDevice::clearLvglPage() {
 #if defined(RV1126B_HAS_LVGL)
+    lvgl_face_page_visible_ = false;
     if (lvgl_ui_ == nullptr) {
         return;
     }
@@ -949,6 +954,8 @@ bool DisplayDevice::isAnimatedFace(DisplayFace face) const {
         case DisplayFace::CONFIRM_FACE:
         case DisplayFace::GESTURE_OK_FACE:
         case DisplayFace::ROCK_FACE:
+        case DisplayFace::BAD_POSTURE_FACE:
+        case DisplayFace::DRINK_REMIND_FACE:
             return true;
         default:
             return false;
@@ -987,6 +994,10 @@ void DisplayDevice::startFaceAnimation(DisplayFace face) {
         std::cout << "[Display][LVGL] show ConfirmFace animated\n";
     } else if (face == DisplayFace::ROCK_FACE) {
         std::cout << "[Display][LVGL] show RockFace animated\n";
+    } else if (face == DisplayFace::BAD_POSTURE_FACE) {
+        std::cout << "[Display][LVGL] show BadPostureFace animated\n";
+    } else if (face == DisplayFace::DRINK_REMIND_FACE) {
+        std::cout << "[Display][LVGL] show DrinkRemindFace animated\n";
     }
 }
 
@@ -1032,6 +1043,12 @@ void DisplayDevice::updateFaceAnimation() {
 
     if (current_face_ == DisplayFace::ROCK_FACE) {
         updateRockAnimation(elapsed_ms);
+        return;
+    }
+
+    if (current_face_ == DisplayFace::BAD_POSTURE_FACE ||
+        current_face_ == DisplayFace::DRINK_REMIND_FACE) {
+        updateAlertAnimation(elapsed_ms);
         return;
     }
 #else
@@ -1125,6 +1142,34 @@ void DisplayDevice::updateRockAnimation(int elapsed_ms) {
         lv_obj_set_x(lvgl_ui_->accent_obj, 77 + x_offset);
     }
     const int phase = static_cast<int>((elapsed_ms / 160) % 3);
+    if (lvgl_ui_ != nullptr) {
+        setDotOpa(lvgl_ui_->dot_one, phase == 0 ? LV_OPA_COVER : LV_OPA_30);
+        setDotOpa(lvgl_ui_->dot_two, phase == 1 ? LV_OPA_COVER : LV_OPA_30);
+        setDotOpa(lvgl_ui_->dot_three, phase == 2 ? LV_OPA_COVER : LV_OPA_30);
+    }
+#else
+    (void)elapsed_ms;
+#endif
+}
+
+void DisplayDevice::updateAlertAnimation(int elapsed_ms) {
+#if defined(RV1126B_HAS_LVGL)
+    const bool posture_alert = current_face_ == DisplayFace::BAD_POSTURE_FACE;
+    if (lvgl_ui_ != nullptr && lvgl_ui_->anim_arc != nullptr) {
+        const int wave = static_cast<int>((elapsed_ms / (posture_alert ? 18 : 28)) % 100);
+        const int value = wave < 50 ? 25 + wave : 125 - wave;
+        lv_arc_set_value(lvgl_ui_->anim_arc, std::clamp(value, 0, 100));
+    }
+    if (lvgl_ui_ != nullptr && lvgl_ui_->accent_obj != nullptr) {
+        if (posture_alert) {
+            const int y_offset = (static_cast<int>((elapsed_ms / 180) % 3) - 1) * 3;
+            lv_obj_set_y(lvgl_ui_->accent_obj, 28 + y_offset);
+        } else {
+            const int x_offset = (static_cast<int>((elapsed_ms / 260) % 3) - 1) * 2;
+            lv_obj_set_x(lvgl_ui_->accent_obj, 77 + x_offset);
+        }
+    }
+    const int phase = static_cast<int>((elapsed_ms / (posture_alert ? 140 : 220)) % 3);
     if (lvgl_ui_ != nullptr) {
         setDotOpa(lvgl_ui_->dot_one, phase == 0 ? LV_OPA_COVER : LV_OPA_30);
         setDotOpa(lvgl_ui_->dot_two, phase == 1 ? LV_OPA_COVER : LV_OPA_30);

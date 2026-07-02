@@ -128,7 +128,7 @@ int main(int argc, char* argv[]) {
     config.drink_distance_threshold = 120.0F;
     config.drink_consecutive_hits = 2;
     config.drink_timer_reminder_enabled = true;
-    config.drink_timer_interval_ms = 30 * 60 * 1000;
+    config.drink_timer_interval_ms = 5 * 60 * 1000;
     config.drink_timer_repeat_ms = 5 * 60 * 1000;
     config.drink_timer_reset_on_drink_detected = true;
     config.drink_timer_confirm_ack_enabled = true;

@@ -15,8 +15,11 @@
   ST7789 + LVGL
 
 
-cd /root/emb_ai/rv1126b_vision_app/
+rm -f -r "/root/rv1126b_vision_app"
+rm -f -r "/root/rv1126b_vision_app.zip"
 
+unzip "/root/rv1126b_vision_app.zip"
+cd /root/rv1126b_vision_app/
 
 ## Build
 
@@ -35,7 +38,7 @@ cmake --build build-rtsp -j2
 
 ## Start
 
-
+RV_PREPROCESS_MODE=rga ./build-rtsp/rv1126b_vision_app
 
 
 ```bash

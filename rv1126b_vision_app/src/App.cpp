@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -474,6 +475,19 @@ std::string cupBoxesSummary(const CupResult& result, const AppConfig& config) {
 
 int64_t absDeltaMs(int64_t lhs, int64_t rhs) {
     return lhs >= rhs ? lhs - rhs : rhs - lhs;
+}
+
+std::string formatDurationZh(int64_t duration_ms) {
+    const int64_t total_seconds = (std::max<int64_t>(0, duration_ms) + 999) / 1000;
+    const int64_t minutes = total_seconds / 60;
+    const int64_t seconds = total_seconds % 60;
+    std::ostringstream oss;
+    if (minutes > 0) {
+        oss << minutes << "分" << seconds << "秒";
+    } else {
+        oss << seconds << "秒";
+    }
+    return oss.str();
 }
 
 bool shouldPublishCooldownEvent(const AppConfig& config, const std::string& event_name) {
@@ -984,9 +998,11 @@ void VisionApp::aiLoop() {
                 break;
             case GestureType::Confirm:
                 acknowledgeDrinkTimerByConfirm(now_ms);
+                acknowledgePostureAlertByGesture("confirm", now_ms);
                 publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "confirm");
                 break;
             case GestureType::Rock:
+                acknowledgePostureAlertByGesture("rock", now_ms);
                 publishDisplayState(nullptr, PostureState::UNKNOWN, DrinkState::NORMAL, "rock");
                 break;
             case GestureType::None:
@@ -1038,6 +1054,7 @@ void VisionApp::aiLoop() {
                   << ", frame=" << frame->id << "\n";
 
         perf_.ai_iterations.fetch_add(1, std::memory_order_relaxed);
+        const auto ai_total_begin = std::chrono::steady_clock::now();
 
         if (config_.debug_ai_delay_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.debug_ai_delay_ms));
@@ -1045,7 +1062,10 @@ void VisionApp::aiLoop() {
 
         const CropRect full_frame_crop{0, 0, frame->width, frame->height};
         auto preprocessInput = [&](const char* model_name, int width, int height, Frame& output) {
-            if (!image_processor_.cropResize(*frame, full_frame_crop, width, height, output)) {
+            const auto preprocess_begin = std::chrono::steady_clock::now();
+            const bool ok = image_processor_.cropResize(*frame, full_frame_crop, width, height, output);
+            perf_.ai_preprocess.addSample(elapsedUs(preprocess_begin));
+            if (!ok) {
                 std::cerr << "[AI] image preprocess failed, model=" << model_name
                           << ", frame=" << frame->id
                           << ", input=" << width << "x" << height << "\n";
@@ -1091,14 +1111,17 @@ void VisionApp::aiLoop() {
         }
 
         if (!running_mode) {
+            perf_.ai_total.addSample(elapsedUs(ai_total_begin));
             continue;
         }
 
         const bool perception_tick = decision.run_pose || decision.run_cup;
         if (!perception_tick) {
+            perf_.ai_total.addSample(elapsedUs(ai_total_begin));
             continue;
         }
 
+        const auto ai_perception_begin = std::chrono::steady_clock::now();
         VisionResult result;
         PostureState posture_state = PostureState::UNKNOWN;
         DrinkState drink_state = DrinkState::NORMAL;
@@ -1240,7 +1263,13 @@ void VisionApp::aiLoop() {
                     }
                 }
                 visual_drink_state = drink_state;
-                drink_state = updateDrinkTimerAndCombine(visual_drink_state, nowMs());
+                const int64_t drink_timer_now_ms = nowMs();
+                drink_state = updateDrinkTimerAndCombine(visual_drink_state, drink_timer_now_ms);
+                std::cout << "[核心][喝水判断] timer_combined_state=" << toString(drink_state)
+                          << "(" << drinkStateLabel(drink_state) << ")"
+                          << ", visual_state=" << toString(visual_drink_state)
+                          << ", 距离下次喝水提醒=" << drinkReminderCountdownText(drink_timer_now_ms)
+                          << "\n";
                 result = composeVisionResult(last_pose_result, last_cup_result, posture_state, drink_state);
                 result.message += ",pipeline=three_model";
                 has_result_to_publish = true;
@@ -1258,7 +1287,13 @@ void VisionApp::aiLoop() {
                         cup_for_state.timestamp_ms = frame->timestamp_ms;
                     }
                     visual_drink_state = DrinkState::NORMAL;
-                    drink_state = updateDrinkTimerAndCombine(visual_drink_state, nowMs());
+                    const int64_t drink_timer_now_ms = nowMs();
+                    drink_state = updateDrinkTimerAndCombine(visual_drink_state, drink_timer_now_ms);
+                    std::cout << "[核心][喝水判断] timer_combined_state=" << toString(drink_state)
+                              << "(" << drinkStateLabel(drink_state) << ")"
+                              << ", visual_state=" << toString(visual_drink_state)
+                              << ", 距离下次喝水提醒=" << drinkReminderCountdownText(drink_timer_now_ms)
+                              << "\n";
                     result = composeVisionResult(
                         pose_for_state,
                         cup_for_state,
@@ -1283,6 +1318,7 @@ void VisionApp::aiLoop() {
                     legacy_input)) {
                 std::cerr << "[AI] skip legacy posture_drink inference, frame=" << frame->id << "\n";
             } else {
+                const auto legacy_begin = std::chrono::steady_clock::now();
                 try {
                     result = posture_drink_model_.infer(legacy_input);
                 } catch (const std::exception& e) {
@@ -1298,11 +1334,18 @@ void VisionApp::aiLoop() {
                     result.message = "legacy_posture_drink_infer_unknown_exception";
                     std::cerr << "[AI] legacy posture_drink infer unknown exception\n";
                 }
+                perf_.legacy_infer.addSample(elapsedUs(legacy_begin));
                 posture_state = result.bad_posture ? PostureState::BAD_ALERT : PostureState::UNKNOWN;
                 drink_state = result.drink_detected ? DrinkState::DRINK_DETECTED :
                               (result.drink_reminder ? DrinkState::NEED_REMIND : DrinkState::NORMAL);
                 visual_drink_state = drink_state;
-                drink_state = updateDrinkTimerAndCombine(visual_drink_state, nowMs());
+                const int64_t drink_timer_now_ms = nowMs();
+                drink_state = updateDrinkTimerAndCombine(visual_drink_state, drink_timer_now_ms);
+                std::cout << "[核心][喝水判断] timer_combined_state=" << toString(drink_state)
+                          << "(" << drinkStateLabel(drink_state) << ")"
+                          << ", visual_state=" << toString(visual_drink_state)
+                          << ", 距离下次喝水提醒=" << drinkReminderCountdownText(drink_timer_now_ms)
+                          << "\n";
                 result.drink_detected = (drink_state == DrinkState::DRINK_DETECTED);
                 result.drink_reminder = (drink_state == DrinkState::NEED_REMIND);
                 result.message += ",drink_timer_combined=" + std::string(toString(drink_state));
@@ -1313,6 +1356,8 @@ void VisionApp::aiLoop() {
         }
 
         if (!has_result_to_publish) {
+            perf_.ai_perception.addSample(elapsedUs(ai_perception_begin));
+            perf_.ai_total.addSample(elapsedUs(ai_total_begin));
             continue;
         }
 
@@ -1320,6 +1365,8 @@ void VisionApp::aiLoop() {
         web_.publishResult(result);
         enqueueAlarmMessages(result, visual_drink_state);
         publishDisplayState(&result, posture_state, drink_state, std::string());
+        perf_.ai_perception.addSample(elapsedUs(ai_perception_begin));
+        perf_.ai_total.addSample(elapsedUs(ai_total_begin));
     }
 }
 
@@ -1401,6 +1448,7 @@ void VisionApp::requestStartByGesture() {
     if (state_.load() == SystemState::Idle) {
         const SystemState from = state_.load();
         state_ = SystemState::Running;
+        posture_alert_silenced_until_ms_ = 0;
         drink_detector_.reset();
         ai_scheduler_.reset();
         resetDrinkTimer("running_start", nowMs());
@@ -1415,11 +1463,26 @@ void VisionApp::requestStopByGesture() {
         state_ = SystemState::Stopping;
         logStateTransition(from, SystemState::Stopping, "gesture(stop)");
         state_ = SystemState::Idle;
+        posture_alert_silenced_until_ms_ = 0;
         drink_detector_.reset();
         ai_scheduler_.reset();
         pauseDrinkTimer("idle_stop");
         logStateTransition(SystemState::Stopping, SystemState::Idle, "stop complete");
     }
+}
+
+void VisionApp::acknowledgePostureAlertByGesture(const char* gesture_name, int64_t now_ms) {
+    const int64_t silence_ms = std::max<int64_t>(0, config_.posture_ack_silence_ms);
+    if (silence_ms <= 0) {
+        return;
+    }
+    posture_alert_silenced_until_ms_ = now_ms + silence_ms;
+    std::cout << "[Posture] acknowledged by " << (gesture_name == nullptr ? "gesture" : gesture_name)
+              << ", suppress_display_ms=" << silence_ms << "\n";
+}
+
+bool VisionApp::isPostureAlertSilenced(int64_t now_ms) const {
+    return posture_alert_silenced_until_ms_ > now_ms;
 }
 
 void VisionApp::resetDrinkTimer(const char*, int64_t now_ms) {
@@ -1475,6 +1538,37 @@ void VisionApp::acknowledgeDrinkTimerByConfirm(int64_t now_ms) {
 
 void VisionApp::queueDrinkTimerReminderEvent() {
     queueMqttEvent(config_, mqtt_queue_, "drink_timer_remind", "Time to drink water", false);
+}
+
+std::string VisionApp::drinkReminderCountdownText(int64_t now_ms) const {
+    if (!config_.drink_timer_reminder_enabled) {
+        return "未启用";
+    }
+    if (state_.load() != SystemState::Running || !drink_timer_initialized_) {
+        return "待机暂停";
+    }
+
+    const int64_t interval_ms = std::max<int64_t>(0, config_.drink_timer_interval_ms);
+    const int64_t repeat_ms = std::max<int64_t>(0, config_.drink_timer_repeat_ms);
+
+    if (drink_timer_active_) {
+        if (repeat_ms <= 0 || drink_timer_last_event_ms_ == 0) {
+            return "已到期，正在提醒";
+        }
+        const int64_t elapsed_since_event_ms = now_ms - drink_timer_last_event_ms_;
+        const int64_t remaining_repeat_ms = repeat_ms - elapsed_since_event_ms;
+        if (remaining_repeat_ms <= 0) {
+            return "已到期，等待重复提醒";
+        }
+        return "提醒中，距离重复提醒还有" + formatDurationZh(remaining_repeat_ms);
+    }
+
+    const int64_t elapsed_since_reset_ms = now_ms - drink_timer_last_reset_ms_;
+    const int64_t remaining_ms = interval_ms - elapsed_since_reset_ms;
+    if (remaining_ms <= 0) {
+        return "即将提醒";
+    }
+    return "还有" + formatDurationZh(remaining_ms);
 }
 
 DrinkState VisionApp::updateDrinkTimerAndCombine(DrinkState visual_drink_state, int64_t now_ms) {
@@ -1595,6 +1689,13 @@ AppState VisionApp::buildAppState(
     state.posture_state = posture_state;
     state.drink_state = drink_state;
     state.frame_id = result->frame_id;
+    state.posture_alert_suppressed =
+        state.posture_alert && isPostureAlertSilenced(state.timestamp_ms);
+    if (state.posture_alert_suppressed) {
+        const int64_t remaining_ms =
+            std::max<int64_t>(0, posture_alert_silenced_until_ms_ - state.timestamp_ms);
+        std::cout << "[Posture] alert display suppressed, remaining_ms=" << remaining_ms << "\n";
+    }
 
     if (state.posture_state == PostureState::UNKNOWN && !result->bad_posture && !result->boxes.empty()) {
         state.posture_state = PostureState::GOOD;
@@ -1671,13 +1772,29 @@ void VisionApp::logPerformanceIfDue() {
     auto consumeCounter = [](std::atomic<uint64_t>& value) -> uint64_t {
         return value.exchange(0, std::memory_order_relaxed);
     };
-    auto consumeAverageMs = [](PerfStat& stat) -> double {
+
+    struct PerfStatSnapshot {
+        double avg_ms{0.0};
+        double min_ms{0.0};
+        double max_ms{0.0};
+    };
+
+    auto consumeStat = [](PerfStat& stat) -> PerfStatSnapshot {
         const uint64_t count = stat.count.exchange(0, std::memory_order_relaxed);
         const uint64_t total_us = stat.total_us.exchange(0, std::memory_order_relaxed);
+        const uint64_t min_us = stat.min_us.exchange(
+            std::numeric_limits<uint64_t>::max(),
+            std::memory_order_relaxed);
+        const uint64_t max_us = stat.max_us.exchange(0, std::memory_order_relaxed);
         if (count == 0) {
-            return 0.0;
+            return PerfStatSnapshot{};
         }
-        return static_cast<double>(total_us) / static_cast<double>(count) / 1000.0;
+        return PerfStatSnapshot{
+            static_cast<double>(total_us) / static_cast<double>(count) / 1000.0,
+            min_us == std::numeric_limits<uint64_t>::max() ? 0.0
+                                                           : static_cast<double>(min_us) / 1000.0,
+            static_cast<double>(max_us) / 1000.0
+        };
     };
 
     const double elapsed_s = static_cast<double>(elapsed_ms) / 1000.0;
@@ -1691,30 +1808,45 @@ void VisionApp::logPerformanceIfDue() {
                               ? static_cast<double>(consumeCounter(perf_.ai_iterations)) / elapsed_s
                               : 0.0;
 
-    const double gesture_ms = consumeAverageMs(perf_.gesture_infer);
-    const double pose_ms = consumeAverageMs(perf_.pose_infer);
-    const double cup_ms = consumeAverageMs(perf_.cup_infer);
-    const double overlay_ms = consumeAverageMs(perf_.overlay);
-    const double enc_ms = consumeAverageMs(perf_.mpp_encode);
-    const double display_ms = consumeAverageMs(perf_.display_show);
+    const PerfStatSnapshot ai_total = consumeStat(perf_.ai_total);
+    const PerfStatSnapshot ai_perception = consumeStat(perf_.ai_perception);
+    const PerfStatSnapshot ai_preprocess = consumeStat(perf_.ai_preprocess);
+    const PerfStatSnapshot gesture = consumeStat(perf_.gesture_infer);
+    const PerfStatSnapshot pose = consumeStat(perf_.pose_infer);
+    const PerfStatSnapshot cup = consumeStat(perf_.cup_infer);
+    const PerfStatSnapshot legacy = consumeStat(perf_.legacy_infer);
+    const PerfStatSnapshot overlay = consumeStat(perf_.overlay);
+    const PerfStatSnapshot enc = consumeStat(perf_.mpp_encode);
+    const PerfStatSnapshot display = consumeStat(perf_.display_show);
 
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(1)
         << "[Perf] cam_fps=" << cam_fps
         << ",enc_fps=" << enc_fps
-        << ",ai_fps=" << ai_fps
-        << ",gesture_ms=" << gesture_ms
-        << ",pose_ms=" << pose_ms
-        << ",cup_ms=" << cup_ms;
+        << ",ai_fps=" << ai_fps;
 
-    if (overlay_ms <= 0.0) {
+    auto appendStat = [&oss](const char* name, const PerfStatSnapshot& stat) {
+        oss << "," << name << "平均_ms=" << stat.avg_ms
+            << "," << name << "最小_ms=" << stat.min_ms
+            << "," << name << "最大_ms=" << stat.max_ms;
+    };
+
+    appendStat("AI总耗时", ai_total);
+    appendStat("AI感知链路", ai_perception);
+    appendStat("AI预处理", ai_preprocess);
+    appendStat("手势推理", gesture);
+    appendStat("姿态推理", pose);
+    appendStat("水杯推理", cup);
+    appendStat("旧模型推理", legacy);
+
+    if (overlay.avg_ms <= 0.0) {
         oss << ",overlay_ms=NA";
     } else {
-        oss << ",overlay_ms=" << overlay_ms;
+        oss << ",overlay_ms=" << overlay.avg_ms;
     }
 
-    oss << ",enc_ms=" << enc_ms
-        << ",display_ms=" << display_ms
+    oss << ",enc_ms=" << enc.avg_ms
+        << ",display_ms=" << display.avg_ms
         << ",eq=" << encode_queue_.size()
         << ",dq=" << display_queue_.size()
         << ",mq=" << mqtt_queue_.size();

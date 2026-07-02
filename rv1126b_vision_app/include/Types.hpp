@@ -202,7 +202,7 @@ struct AppConfig {
     std::size_t cup_log_max_boxes{3};
     bool cup_log_verbose_boxes{false};
     bool drink_timer_reminder_enabled{true};
-    int drink_timer_interval_ms{30 * 60 * 1000};
+    int drink_timer_interval_ms{5 * 60 * 1000};
     int drink_timer_repeat_ms{5 * 60 * 1000};
     bool drink_timer_reset_on_drink_detected{true};
     bool drink_timer_confirm_ack_enabled{true};
@@ -234,6 +234,7 @@ struct AppConfig {
     int display_start_stop_ms{3000};
     int display_confirm_ms{3000};
     int display_rock_ms{20000};
+    int posture_ack_silence_ms{30000};
     bool enable_perf_log{true};
     int perf_log_interval_ms{2000};
     std::string st7789_spi_device{"/dev/spidev0.0"};
@@ -428,6 +429,7 @@ struct AppState {
     std::string gesture_name;
     bool gesture_triggered{false};
     bool posture_alert{false};
+    bool posture_alert_suppressed{false};
     bool drink_alert{false};
     int64_t timestamp_ms{0};
 };
@@ -540,6 +542,7 @@ inline std::string appStateToJson(const AppState& state) {
         << "\"gesture_triggered\":" << (state.gesture_triggered ? "true" : "false") << ","
         << "\"gesture_name\":\"" << jsonEscape(state.gesture_name) << "\","
         << "\"posture_alert\":" << (state.posture_alert ? "true" : "false") << ","
+        << "\"posture_alert_suppressed\":" << (state.posture_alert_suppressed ? "true" : "false") << ","
         << "\"drink_alert\":" << (state.drink_alert ? "true" : "false")
         << "}";
     return oss.str();
@@ -563,7 +566,8 @@ inline DisplayFace selectDisplayFace(const AppState& state) {
     }
 
     // 展示优先级：告警优先于待机；喝水成功只重置提醒，不单独展示成功页；坐姿异常比饮水提醒更紧急。
-    if (state.posture_state == PostureState::BadAlert || state.posture_alert) {
+    if (!state.posture_alert_suppressed &&
+        (state.posture_state == PostureState::BadAlert || state.posture_alert)) {
         return DisplayFace::BadPostureFace;
     }
 
