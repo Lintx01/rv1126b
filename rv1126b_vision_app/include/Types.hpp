@@ -562,11 +562,7 @@ inline DisplayFace selectDisplayFace(const AppState& state) {
         return DisplayFace::GestureOkFace;
     }
 
-    // 展示优先级：告警优先于待机；喝水成功反馈优先保留；坐姿异常比饮水提醒更紧急。
-    if (state.drink_state == DrinkState::DrinkDetected) {
-        return DisplayFace::DrinkOkFace;
-    }
-
+    // 展示优先级：告警优先于待机；喝水成功只重置提醒，不单独展示成功页；坐姿异常比饮水提醒更紧急。
     if (state.posture_state == PostureState::BadAlert || state.posture_alert) {
         return DisplayFace::BadPostureFace;
     }
