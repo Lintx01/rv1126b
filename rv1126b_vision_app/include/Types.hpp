@@ -207,7 +207,7 @@ struct AppConfig {
     bool drink_timer_reset_on_drink_detected{true};
     bool drink_timer_confirm_ack_enabled{true};
     bool enable_audio_reminder{true};
-    std::string audio_device{"plughw:0,0"};
+    std::string audio_device{"default"};
     std::string posture_audio_path{"audio_record/posture.wav"};
     std::string drink_audio_path{"audio_record/drink.wav"};
     int posture_audio_confirm_ms{3000};

@@ -41,6 +41,24 @@ cmake --build build-rtsp -j2
 RV_PREPROCESS_MODE=rga ./build-rtsp/rv1126b_vision_app
 
 
+喝水提醒快测：
+RV_PREPROCESS_MODE=rga \
+RV_FORCE_AI_RUNNING=1 \
+RV_DRINK_TIMER_INTERVAL_MS=15000 \
+RV_DRINK_TIMER_REPEAT_MS=15000 \
+./build-rtsp/rv1126b_vision_app
+等待约 15 秒，应该听到喝水语音，日志里会有：
+[AudioReminder] queued reason=drink_timer
+[AudioReminder] play audio_record/drink.wav
+坐姿提醒快测：
+RV_PREPROCESS_MODE=rga \
+RV_FORCE_AI_RUNNING=1 \
+RV_POSTURE_AUDIO_CONFIRM_MS=2000 \
+RV_POSTURE_AUDIO_COOLDOWN_MS=10000 \
+./build-rtsp/rv1126b_vision_app
+
+
+
 ```bash
 chmod +x run_demo.sh
 ./run_demo.sh
