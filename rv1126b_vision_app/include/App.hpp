@@ -31,6 +31,7 @@ private:
     void aiLoop();
     void mqttLoop();
     void displayLoop();
+    void audioLoop();
     void runThread(const std::string& name, const std::function<void()>& loop);
 
     void requestStartByGesture();
@@ -42,6 +43,9 @@ private:
     void clearDrinkTimerByDrinkDetected(int64_t now_ms);
     void acknowledgeDrinkTimerByConfirm(int64_t now_ms);
     void queueDrinkTimerReminderEvent();
+    void queueDrinkAudioReminder();
+    void queueAudioReminder(const char* reason, const std::string& path);
+    void updatePostureAudioReminder(PostureState posture_state, int64_t now_ms);
     std::string drinkReminderCountdownText(int64_t now_ms) const;
     DrinkState updateDrinkTimerAndCombine(DrinkState visual_drink_state, int64_t now_ms);
     void enqueueAlarmMessages(const VisionResult& result, DrinkState visual_drink_state);
@@ -130,12 +134,14 @@ private:
     BlockingQueue<FramePtr> encode_queue_{4, QueueOverflowPolicy::DROP_OLDEST};
     BlockingQueue<MqttMessage> mqtt_queue_{32, QueueOverflowPolicy::BLOCK};
     BlockingQueue<DisplayFace> display_queue_{8, QueueOverflowPolicy::DROP_OLDEST};
+    BlockingQueue<std::string> audio_queue_{2, QueueOverflowPolicy::DROP_NEWEST};
 
     std::thread camera_thread_;
     std::thread encoder_thread_;
     std::thread ai_thread_;
     std::thread mqtt_thread_;
     std::thread display_thread_;
+    std::thread audio_thread_;
 
     std::atomic<bool> exit_requested_{false};
     std::atomic<bool> thread_error_{false};
@@ -146,6 +152,9 @@ private:
     bool drink_timer_active_{false};
     bool drink_timer_initialized_{false};
     int64_t posture_alert_silenced_until_ms_{0};
+    int64_t posture_audio_bad_since_ms_{0};
+    int64_t posture_audio_good_since_ms_{0};
+    int64_t posture_audio_last_play_ms_{0};
     PerfCounters perf_;
 };
 

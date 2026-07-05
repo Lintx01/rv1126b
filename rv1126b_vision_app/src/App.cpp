@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstdint>
 #include <ctime>
 #include <iomanip>
@@ -364,6 +365,21 @@ std::string buildEventPayload(const std::string& event_name, const std::string& 
     return oss.str();
 }
 
+std::string shellQuote(const std::string& value) {
+    std::string quoted;
+    quoted.reserve(value.size() + 2);
+    quoted.push_back('\'');
+    for (char ch : value) {
+        if (ch == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted.push_back(ch);
+        }
+    }
+    quoted.push_back('\'');
+    return quoted;
+}
+
 std::string buildTelemetryPayload(const AppConfig& config) {
     std::ostringstream oss;
     oss << "{"
@@ -636,6 +652,14 @@ bool VisionApp::start() {
         posture_analyzer_.configure(config_);
         drink_detector_.configure(config_);
         ai_scheduler_.configure(config_);
+        std::cout << "[AudioReminder] enabled=" << (config_.enable_audio_reminder ? "true" : "false")
+                  << ", device=" << config_.audio_device
+                  << ", posture=" << config_.posture_audio_path
+                  << ", drink=" << config_.drink_audio_path
+                  << ", posture_confirm_ms=" << config_.posture_audio_confirm_ms
+                  << ", posture_cooldown_ms=" << config_.posture_audio_cooldown_ms
+                  << ", posture_good_reset_ms=" << config_.posture_audio_good_reset_ms
+                  << "\n";
         std::cout << "[AI] pipeline config: three_model="
                   << (config_.use_three_model_pipeline ? "true" : "false")
                   << ", legacy_fallback="
@@ -702,6 +726,9 @@ bool VisionApp::start() {
 
         exit_requested_ = false;
         thread_error_ = false;
+        posture_audio_bad_since_ms_ = 0;
+        posture_audio_good_since_ms_ = 0;
+        posture_audio_last_play_ms_ = 0;
         if (config_.force_ai_running) {
             state_ = SystemState::Running;
             drink_detector_.reset();
@@ -731,6 +758,9 @@ bool VisionApp::start() {
         ai_thread_ = std::thread(&VisionApp::runThread, this, "ai", [this] { aiLoop(); });
         mqtt_thread_ = std::thread(&VisionApp::runThread, this, "mqtt", [this] { mqttLoop(); });
         display_thread_ = std::thread(&VisionApp::runThread, this, "display", [this] { displayLoop(); });
+        if (config_.enable_audio_reminder) {
+            audio_thread_ = std::thread(&VisionApp::runThread, this, "audio", [this] { audioLoop(); });
+        }
         return true;
     } catch (const std::exception& e) {
         std::cerr << "[App] start exception: " << e.what() << "\n";
@@ -753,6 +783,7 @@ void VisionApp::stop() {
     encode_queue_.close();
     mqtt_queue_.close();
     display_queue_.close();
+    audio_queue_.close();
     FramePool::instance().close();
 
     if (camera_thread_.joinable()) {
@@ -769,6 +800,9 @@ void VisionApp::stop() {
     }
     if (display_thread_.joinable()) {
         display_thread_.join();
+    }
+    if (audio_thread_.joinable()) {
+        audio_thread_.join();
     }
 
     web_.stop();
@@ -814,6 +848,7 @@ void VisionApp::runThread(const std::string& name, const std::function<void()>& 
         encode_queue_.close();
         mqtt_queue_.close();
         display_queue_.close();
+        audio_queue_.close();
         std::cerr << "[Thread] " << name << " exception: " << e.what() << "\n";
     } catch (...) {
         thread_error_ = true;
@@ -822,6 +857,7 @@ void VisionApp::runThread(const std::string& name, const std::function<void()>& 
         encode_queue_.close();
         mqtt_queue_.close();
         display_queue_.close();
+        audio_queue_.close();
         std::cerr << "[Thread] " << name << " unknown exception\n";
     }
 }
@@ -1365,8 +1401,27 @@ void VisionApp::aiLoop() {
         web_.publishResult(result);
         enqueueAlarmMessages(result, visual_drink_state);
         publishDisplayState(&result, posture_state, drink_state, std::string());
+        updatePostureAudioReminder(posture_state, nowMs());
         perf_.ai_perception.addSample(elapsedUs(ai_perception_begin));
         perf_.ai_total.addSample(elapsedUs(ai_total_begin));
+    }
+}
+
+void VisionApp::audioLoop() {
+    while (true) {
+        auto item = audio_queue_.pop();
+        if (!item.has_value()) {
+            break;
+        }
+
+        const std::string command =
+            "aplay -q -D " + shellQuote(config_.audio_device) + " " + shellQuote(*item);
+        std::cout << "[AudioReminder] play " << *item << "\n";
+        const int rc = std::system(command.c_str());
+        if (rc != 0) {
+            std::cerr << "[AudioReminder][WARN] aplay failed, rc=" << rc
+                      << ", file=" << *item << "\n";
+        }
     }
 }
 
@@ -1538,6 +1593,65 @@ void VisionApp::acknowledgeDrinkTimerByConfirm(int64_t now_ms) {
 
 void VisionApp::queueDrinkTimerReminderEvent() {
     queueMqttEvent(config_, mqtt_queue_, "drink_timer_remind", "Time to drink water", false);
+    queueDrinkAudioReminder();
+}
+
+void VisionApp::queueDrinkAudioReminder() {
+    queueAudioReminder("drink_timer", config_.drink_audio_path);
+}
+
+void VisionApp::queueAudioReminder(const char* reason, const std::string& path) {
+    if (!config_.enable_audio_reminder || path.empty()) {
+        return;
+    }
+    if (!audio_queue_.push(path)) {
+        std::cerr << "[AudioReminder][WARN] queue full or closed, drop reason="
+                  << (reason == nullptr ? "unknown" : reason)
+                  << ", file=" << path << "\n";
+        return;
+    }
+    std::cout << "[AudioReminder] queued reason="
+              << (reason == nullptr ? "unknown" : reason)
+              << ", file=" << path << "\n";
+}
+
+void VisionApp::updatePostureAudioReminder(PostureState posture_state, int64_t now_ms) {
+    if (!config_.enable_audio_reminder || state_.load() != SystemState::Running) {
+        return;
+    }
+
+    const bool bad_posture = posture_state == PostureState::BAD_ALERT;
+    if (bad_posture) {
+        if (posture_audio_bad_since_ms_ == 0) {
+            posture_audio_bad_since_ms_ = now_ms;
+        }
+        posture_audio_good_since_ms_ = 0;
+
+        const int64_t confirm_ms = std::max<int64_t>(0, config_.posture_audio_confirm_ms);
+        const int64_t cooldown_ms = std::max<int64_t>(0, config_.posture_audio_cooldown_ms);
+        const bool confirmed = (now_ms - posture_audio_bad_since_ms_) >= confirm_ms;
+        const bool cooled_down =
+            posture_audio_last_play_ms_ == 0 || (now_ms - posture_audio_last_play_ms_) >= cooldown_ms;
+        if (confirmed && cooled_down) {
+            queueAudioReminder("bad_posture", config_.posture_audio_path);
+            posture_audio_last_play_ms_ = now_ms;
+        }
+        return;
+    }
+
+    if (posture_state == PostureState::GOOD) {
+        if (posture_audio_good_since_ms_ == 0) {
+            posture_audio_good_since_ms_ = now_ms;
+        }
+        const int64_t good_reset_ms = std::max<int64_t>(0, config_.posture_audio_good_reset_ms);
+        if ((now_ms - posture_audio_good_since_ms_) >= good_reset_ms) {
+            posture_audio_bad_since_ms_ = 0;
+        }
+        return;
+    }
+
+    posture_audio_bad_since_ms_ = 0;
+    posture_audio_good_since_ms_ = 0;
 }
 
 std::string VisionApp::drinkReminderCountdownText(int64_t now_ms) const {

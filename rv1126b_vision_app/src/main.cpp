@@ -6,6 +6,7 @@
 #include <cstring>
 #include <chrono>
 #include <iostream>
+#include <string>
 #include <thread>
 
 namespace {
@@ -24,6 +25,39 @@ bool isEnabledEnvValue(const char* value) {
            std::strcmp(value, "true") == 0 ||
            std::strcmp(value, "on") == 0 ||
            std::strcmp(value, "yes") == 0;
+}
+
+bool isDisabledEnvValue(const char* value) {
+    if (value == nullptr) {
+        return false;
+    }
+    return std::strcmp(value, "0") == 0 ||
+           std::strcmp(value, "false") == 0 ||
+           std::strcmp(value, "off") == 0 ||
+           std::strcmp(value, "no") == 0;
+}
+
+int envIntOrDefault(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0') {
+        std::cerr << "[Config][WARN] invalid integer env " << name << "=" << value
+                  << ", keep " << fallback << "\n";
+        return fallback;
+    }
+    return static_cast<int>(parsed);
+}
+
+std::string envStringOrDefault(const char* name, const std::string& fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        return fallback;
+    }
+    return value;
 }
 
 }  // namespace
@@ -132,6 +166,20 @@ int main(int argc, char* argv[]) {
     config.drink_timer_repeat_ms = 5 * 60 * 1000;
     config.drink_timer_reset_on_drink_detected = true;
     config.drink_timer_confirm_ack_enabled = true;
+    config.enable_audio_reminder = !isDisabledEnvValue(std::getenv("RV_AUDIO_REMINDER"));
+    config.audio_device = envStringOrDefault("RV_AUDIO_DEVICE", config.audio_device);
+    config.posture_audio_path = envStringOrDefault("RV_POSTURE_AUDIO", config.posture_audio_path);
+    config.drink_audio_path = envStringOrDefault("RV_DRINK_AUDIO", config.drink_audio_path);
+    config.posture_audio_confirm_ms =
+        envIntOrDefault("RV_POSTURE_AUDIO_CONFIRM_MS", config.posture_audio_confirm_ms);
+    config.posture_audio_cooldown_ms =
+        envIntOrDefault("RV_POSTURE_AUDIO_COOLDOWN_MS", config.posture_audio_cooldown_ms);
+    config.posture_audio_good_reset_ms =
+        envIntOrDefault("RV_POSTURE_AUDIO_GOOD_RESET_MS", config.posture_audio_good_reset_ms);
+    config.drink_timer_interval_ms =
+        envIntOrDefault("RV_DRINK_TIMER_INTERVAL_MS", config.drink_timer_interval_ms);
+    config.drink_timer_repeat_ms =
+        envIntOrDefault("RV_DRINK_TIMER_REPEAT_MS", config.drink_timer_repeat_ms);
     // 调试时可改成 15000 表示 15 秒提醒一次。
     // config.drink_timer_interval_ms = 15000;
     // config.drink_timer_repeat_ms = 10000;

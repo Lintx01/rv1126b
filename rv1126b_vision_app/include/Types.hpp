@@ -206,6 +206,13 @@ struct AppConfig {
     int drink_timer_repeat_ms{5 * 60 * 1000};
     bool drink_timer_reset_on_drink_detected{true};
     bool drink_timer_confirm_ack_enabled{true};
+    bool enable_audio_reminder{true};
+    std::string audio_device{"plughw:0,0"};
+    std::string posture_audio_path{"audio_record/posture.wav"};
+    std::string drink_audio_path{"audio_record/drink.wav"};
+    int posture_audio_confirm_ms{3000};
+    int posture_audio_cooldown_ms{60000};
+    int posture_audio_good_reset_ms{5000};
     int debug_ai_delay_ms{0};
     bool force_ai_running{false};
 
