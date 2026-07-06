@@ -21,6 +21,12 @@ rm -f -r "/root/rv1126b_vision_app.zip"
 unzip "/root/rv1126b_vision_app.zip"
 cd /root/rv1126b_vision_app/
 
+测试时：
+amixer -c 0 set 'Speaker' on
+amixer -c 0 set 'spk switch' on
+amixer -c 0 set 'Power Amplifier' on
+amixer -c 0 set 'DAC Digital' 30%
+
 ## Build
 
 ```bash

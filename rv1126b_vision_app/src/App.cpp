@@ -18,6 +18,16 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#include <direct.h>
+#define RV1126B_GETCWD _getcwd
+#else
+#include <unistd.h>
+#define RV1126B_GETCWD getcwd
+#endif
+
+#include <sys/stat.h>
+
 namespace rv1126b {
 
 namespace {
@@ -378,6 +388,22 @@ std::string shellQuote(const std::string& value) {
     }
     quoted.push_back('\'');
     return quoted;
+}
+
+long long fileSizeBytes(const std::string& path) {
+    struct stat stat_buffer {};
+    if (stat(path.c_str(), &stat_buffer) != 0) {
+        return -1;
+    }
+    return static_cast<long long>(stat_buffer.st_size);
+}
+
+std::string currentWorkingDirectory() {
+    char buffer[1024]{};
+    if (RV1126B_GETCWD(buffer, sizeof(buffer)) == nullptr) {
+        return "<unknown>";
+    }
+    return buffer;
 }
 
 std::string buildTelemetryPayload(const AppConfig& config) {
@@ -1414,9 +1440,15 @@ void VisionApp::audioLoop() {
             break;
         }
 
+        const long long file_size = fileSizeBytes(*item);
+        const std::string cwd = currentWorkingDirectory();
         const std::string command =
             "aplay -q -D " + shellQuote(config_.audio_device) + " " + shellQuote(*item);
-        std::cout << "[AudioReminder] play " << *item << "\n";
+        std::cout << "[AudioReminder] play file=" << *item
+                  << ", device=" << config_.audio_device
+                  << ", cwd=" << cwd
+                  << ", size=" << file_size
+                  << ", command=" << command << "\n";
         const int rc = std::system(command.c_str());
         if (rc != 0) {
             std::cerr << "[AudioReminder][WARN] aplay failed, rc=" << rc
